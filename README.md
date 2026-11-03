@@ -42,6 +42,7 @@ What is in `dev-main` now:
 
 - `fix/405-whatsmeow-bump` — upstream PR [#381](https://github.com/lharries/whatsapp-mcp/pull/381): updates whatsmeow to fix the `Client outdated (405)` connect error. Requires Go 1.26 or newer.
 - `fix/media-403` — upstream PR [#361](https://github.com/lharries/whatsapp-mcp/pull/361): fixes the 403 error on `/api/download` for media.
+- `fix/media-same-name` — upstream PR [#370](https://github.com/lharries/whatsapp-mcp/pull/370): media with the same filename in a chat (such as photos sent together) each get their own file instead of overwriting each other.
 
 This is temporary. The plan is to merge `dev-main` into `main` at some point and announce that this fork is actively maintained. From then on, `main` will be the branch to use.
 
