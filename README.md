@@ -14,6 +14,37 @@ Here's an example of what you can do when it's connected to Claude.
 
 > *Caution:* as with many MCP servers, the WhatsApp MCP is subject to [the lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/). This means that project injection could lead to private data exfiltration.
 
+## About this fork and its branches
+
+This is a fork of [lharries/whatsapp-mcp](https://github.com/lharries/whatsapp-mcp). Upstream has had no commits since July 2025, and many fixes are waiting there as unmerged pull requests. This fork collects those fixes.
+
+| Branch | Purpose |
+| --- | --- |
+| `main` | Mirrors upstream `main`. Only updated by pulling from upstream; no fork-specific changes. |
+| `dev-main` | Development branch. Collects all feature and fix branches. **Use this branch** if you want a working bridge. |
+| `fix/*`, `feat/*` | One branch per change (often an upstream PR). Merged into `dev-main` with `--no-ff`, so each change stays visible and easy to revert. |
+
+Working with the branches:
+
+```bash
+# one-time: track the original project
+git remote add upstream git@github.com:lharries/whatsapp-mcp.git
+
+# keep main in sync with upstream
+git checkout main && git pull --ff-only upstream main
+
+# bring an upstream PR in as a feature branch, then collect it in dev-main
+git fetch upstream pull/<PR>/head:fix/<name>
+git checkout dev-main && git merge --no-ff fix/<name>
+```
+
+What is in `dev-main` now:
+
+- `fix/405-whatsmeow-bump` — upstream PR [#381](https://github.com/lharries/whatsapp-mcp/pull/381): updates whatsmeow to fix the `Client outdated (405)` connect error. Requires Go 1.26 or newer.
+- `fix/media-403` — upstream PR [#361](https://github.com/lharries/whatsapp-mcp/pull/361): fixes the 403 error on `/api/download` for media.
+
+This is temporary. The plan is to merge `dev-main` into `main` at some point and announce that this fork is actively maintained. From then on, `main` will be the branch to use.
+
 ## Installation
 
 ### Prerequisites
