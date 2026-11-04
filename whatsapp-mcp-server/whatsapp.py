@@ -21,7 +21,7 @@ def _post(url: str, payload: dict) -> requests.Response:
     """POST to the local bridge with its shared secret and a timeout."""
     if not BRIDGE_TOKEN:
         raise requests.RequestException("WHATSAPP_BRIDGE_TOKEN is not set")
-    return requests.post(url, json=payload, headers={"X-Bridge-Token": BRIDGE_TOKEN}, timeout=60)
+    return requests.post(url, json=payload, headers={"X-Bridge-Token": BRIDGE_TOKEN}, timeout=BRIDGE_TIMEOUT)
 
 
 def _inside_media_dir(path: str) -> bool:
@@ -31,6 +31,17 @@ def _inside_media_dir(path: str) -> bool:
     root = os.path.realpath(MEDIA_DIR)
     real = os.path.realpath(path)
     return os.path.commonpath([root, real]) == root
+
+# (connect, read) timeout for calls to the bridge. The read timeout is generous
+# because the bridge uploads media to WhatsApp before it responds.
+BRIDGE_TIMEOUT = (5, 300)
+
+def _check_non_negative(**values: int) -> None:
+    # SQLite treats a negative LIMIT as "no limit", so a stray -1 would dump the
+    # whole table instead of failing.
+    for name, value in values.items():
+        if value < 0:
+            raise ValueError(f"'{name}' must be 0 or greater, got {value}")
 
 @dataclass
 class Message:
@@ -156,6 +167,7 @@ def list_messages(
     context_after: int = 1
 ) -> List[Message]:
     """Get messages matching the specified criteria with optional context."""
+    _check_non_negative(limit=limit, page=page, context_before=context_before, context_after=context_after)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -251,6 +263,7 @@ def get_message_context(
     after: int = 5
 ) -> MessageContext:
     """Get context around a specific message."""
+    _check_non_negative(before=before, after=after)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -346,6 +359,7 @@ def list_chats(
     sort_by: str = "last_active"
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
+    _check_non_negative(limit=limit, page=page)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -475,12 +489,16 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    _check_non_negative(limit=limit, page=page)
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
+        # Find the matching chats first and only then attach the last message.
+        # Joining on every message (and relying on DISTINCT) returned one row
+        # per message the contact had sent, not one per chat.
         cursor.execute("""
-            SELECT DISTINCT
+            SELECT
                 c.jid,
                 c.name,
                 c.last_message_time,
@@ -488,8 +506,14 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
                 m.sender as last_sender,
                 m.is_from_me as last_is_from_me
             FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
+            LEFT JOIN messages m ON m.rowid = (
+                SELECT rowid FROM messages
+                WHERE chat_jid = c.jid
+                ORDER BY timestamp DESC
+                LIMIT 1
+            )
+            WHERE c.jid = ?
+                OR c.jid IN (SELECT chat_jid FROM messages WHERE sender = ?)
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
         """, (jid, jid, limit, page * limit))
@@ -690,6 +714,8 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
+    except requests.Timeout:
+        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying."
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -727,6 +753,8 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
+    except requests.Timeout:
+        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying."
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
@@ -770,6 +798,8 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         else:
             return False, f"Error: HTTP {response.status_code} - {response.text}"
             
+    except requests.Timeout:
+        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying."
     except requests.RequestException as e:
         return False, f"Request error: {str(e)}"
     except json.JSONDecodeError:
