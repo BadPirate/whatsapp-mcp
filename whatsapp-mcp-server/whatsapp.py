@@ -129,6 +129,10 @@ class Message:
     media_type: Optional[str] = None
     quoted_message_id: Optional[str] = None  # set when this message is a reply
 
+    def __post_init__(self):
+        # SQLite returns 0/1; the declared type (and the MCP output) is a bool.
+        self.is_from_me = bool(self.is_from_me)
+
 @dataclass
 class Chat:
     jid: str
@@ -137,6 +141,10 @@ class Chat:
     last_message: Optional[str] = None
     last_sender: Optional[str] = None
     last_is_from_me: Optional[bool] = None
+
+    def __post_init__(self):
+        if self.last_is_from_me is not None:
+            self.last_is_from_me = bool(self.last_is_from_me)
 
     @property
     def is_group(self) -> bool:
@@ -208,7 +216,7 @@ def _quoted_column(cursor, table: str = "messages") -> str:
     return f"{table}.quoted_message_id" if cursor.fetchone() else "NULL"
 
 
-def format_message(message: Message, show_chat_info: bool = True) -> None:
+def format_message(message: Message, show_chat_info: bool = True) -> str:
     """Print a single message with consistent formatting."""
     output = ""
     
@@ -232,7 +240,7 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         print(f"Error formatting message: {e}", file=sys.stderr)
     return output
 
-def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
+def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> str:
     output = ""
     if not messages:
         output += "No messages to display."
@@ -270,7 +278,7 @@ def list_messages(
     include_context: bool = True,
     context_before: int = 1,
     context_after: int = 1
-) -> List[Message]:
+) -> str:
     """Get messages matching the specified criteria with optional context."""
     _check_non_negative(limit=limit, page=page, context_before=context_before, context_after=context_after)
     try:
@@ -367,7 +375,7 @@ def list_messages(
         
     except sqlite3.Error as e:
         print(f"Database error: {e}", file=sys.stderr)
-        return []
+        return f"Database error: {e}"
     finally:
         if 'conn' in locals():
             conn.close()
@@ -664,7 +672,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
             conn.close()
 
 
-def get_last_interaction(jid: str) -> str:
+def get_last_interaction(jid: str) -> Optional[str]:
     """Get most recent message involving the contact."""
     try:
         conn = _connect()
