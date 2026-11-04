@@ -44,6 +44,8 @@ What is in `dev-main` now:
 - `fix/405-whatsmeow-bump` — upstream PR [#381](https://github.com/lharries/whatsapp-mcp/pull/381): updates whatsmeow to fix the `Client outdated (405)` connect error. Requires Go 1.26 or newer.
 - `fix/media-403` — upstream PR [#361](https://github.com/lharries/whatsapp-mcp/pull/361): fixes the 403 error on `/api/download` for media.
 - `fix/media-same-name` — upstream PR [#370](https://github.com/lharries/whatsapp-mcp/pull/370): media with the same filename in a chat (such as photos sent together) each get their own file instead of overwriting each other.
+- `fix/whatsmeow-1006` — upstream PR [#392](https://github.com/lharries/whatsapp-mcp/pull/392): a newer whatsmeow, for `websocket 1006` disconnects while connecting.
+- `fix/media-cdn-auth` — upstream PR [#367](https://github.com/lharries/whatsapp-mcp/pull/367): tests that media downloads keep the CDN signature. The fix itself was already in `fix/media-403`.
 
 Security:
 
@@ -58,6 +60,8 @@ Fixes and speed:
 - `fix/list-chats-no-last-message` — upstream PR [#380](https://github.com/lharries/whatsapp-mcp/pull/380): `list_chats` and `get_chat` work with `include_last_message=False`.
 - `fix/contact-chats-limits-timeouts` — upstream PR [#373](https://github.com/lharries/whatsapp-mcp/pull/373): no duplicate rows in `get_contact_chats`, negative limits are rejected, and calls to the bridge time out.
 - `fix/document-mime` — upstream PR [#390](https://github.com/lharries/whatsapp-mcp/pull/390): documents are sent with their real file type and name instead of as unnamed `.bin` files.
+- `fix/document-mime-type` — upstream PR [#328](https://github.com/lharries/whatsapp-mcp/pull/328): the same fix as #390; merged for its history only.
+- `fix/voice-message-cleanup` — upstream PR [#369](https://github.com/lharries/whatsapp-mcp/pull/369): `send_audio_message` deletes the converted `.ogg` file after sending.
 - `fix/gitignore-binary` — upstream PR [#349](https://github.com/lharries/whatsapp-mcp/pull/349): git ignores the compiled bridge program.
 - `fix/sqlite-indexes` — upstream PR [#279](https://github.com/lharries/whatsapp-mcp/pull/279): database indexes for faster message and chat queries.
 - `fix/sqlite-wal` — upstream PR [#393](https://github.com/lharries/whatsapp-mcp/pull/393): faster history sync and WAL mode for the databases.
