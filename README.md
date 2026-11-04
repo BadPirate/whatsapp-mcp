@@ -64,6 +64,7 @@ Fixes and speed:
 - `fix/voice-message-cleanup` — upstream PR [#369](https://github.com/lharries/whatsapp-mcp/pull/369): `send_audio_message` deletes the converted `.ogg` file after sending.
 - `feat/fts5-search` — upstream PR [#281](https://github.com/lharries/whatsapp-mcp/pull/281): fast full-text search in `list_messages`. Needs the bridge built with `-tags sqlite_fts5`; without it, search uses the old slow scan. A search matches whole words or the start of a word, not text in the middle of a word.
 - `feat/mcp-2x` — upstream PR [#378](https://github.com/lharries/whatsapp-mcp/pull/378): the MCP server uses mcp 2.x, so MCP clients on the 2.x protocol connect at once instead of waiting for a timeout. Needs Python 3.11 or newer.
+- `fix/mcp2-tool-output-types` — fork fix: with mcp 2.x every read tool failed ("Error executing tool"), because the tools declared a different return type than they returned. Fixed, with a test that calls every tool through the MCP server.
 - `ci/github-actions` — upstream PR [#150](https://github.com/lharries/whatsapp-mcp/pull/150): GitHub Actions builds and tests the bridge (with and without full-text search) and runs the Python tests on every push.
 - `fix/gitignore-binary` — upstream PR [#349](https://github.com/lharries/whatsapp-mcp/pull/349): git ignores the compiled bridge program.
 - `fix/sqlite-indexes` — upstream PR [#279](https://github.com/lharries/whatsapp-mcp/pull/279): database indexes for faster message and chat queries.
