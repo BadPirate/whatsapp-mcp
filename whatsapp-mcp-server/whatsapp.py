@@ -839,7 +839,7 @@ def send_message(
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
-def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
+def send_file(recipient: str, media_path: str, caption: str = "") -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -857,7 +857,9 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
-            "media_path": media_path
+            "media_path": media_path,
+            # The bridge uses "message" as the caption for images, videos and documents.
+            "message": caption
         }
         
         response = _post(url, payload)
