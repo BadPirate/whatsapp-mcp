@@ -10,3 +10,7 @@ whatsapp-bridge/whatsapp-bridge
 # Local secrets and WhatsApp data: session keys, message history, media
 .env
 whatsapp-bridge/store/
+
+# Local backups
+*.bak-*
+*.orig
