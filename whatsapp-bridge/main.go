@@ -225,9 +225,19 @@ func NewMessageStore() (*MessageStore, error) {
 		END;
 	`)
 	if err != nil {
+		// A bridge built with the tag may have created these triggers. Without
+		// FTS5 they would make every message insert fail, so drop them. The MCP
+		// server only searches the index while messages_ai exists, and the next
+		// start with FTS5 recreates the triggers and rebuilds the index.
+		for _, trigger := range []string{"messages_ai", "messages_ad", "messages_au"} {
+			if _, dropErr := db.Exec("DROP TRIGGER IF EXISTS " + trigger); dropErr != nil {
+				db.Close()
+				return nil, fmt.Errorf("failed to drop FTS trigger %s: %v", trigger, dropErr)
+			}
+		}
 		fmt.Printf(
 			"FTS5 unavailable (%v); content search will fall back to LIKE. "+
-				"To enable full-text search, rebuild with:  go build -tags sqlite_fts5\n",
+				"To enable full-text search, run with:  go run -tags sqlite_fts5 .\n",
 			err,
 		)
 	} else {

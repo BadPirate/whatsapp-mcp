@@ -62,6 +62,7 @@ Fixes and speed:
 - `fix/document-mime` — upstream PR [#390](https://github.com/lharries/whatsapp-mcp/pull/390): documents are sent with their real file type and name instead of as unnamed `.bin` files.
 - `fix/document-mime-type` — upstream PR [#328](https://github.com/lharries/whatsapp-mcp/pull/328): the same fix as #390; merged for its history only.
 - `fix/voice-message-cleanup` — upstream PR [#369](https://github.com/lharries/whatsapp-mcp/pull/369): `send_audio_message` deletes the converted `.ogg` file after sending.
+- `feat/fts5-search` — upstream PR [#281](https://github.com/lharries/whatsapp-mcp/pull/281): fast full-text search in `list_messages`. Needs the bridge built with `-tags sqlite_fts5`; without it, search uses the old slow scan. A search matches whole words or the start of a word, not text in the middle of a word.
 - `fix/gitignore-binary` — upstream PR [#349](https://github.com/lharries/whatsapp-mcp/pull/349): git ignores the compiled bridge program.
 - `fix/sqlite-indexes` — upstream PR [#279](https://github.com/lharries/whatsapp-mcp/pull/279): database indexes for faster message and chat queries.
 - `fix/sqlite-wal` — upstream PR [#393](https://github.com/lharries/whatsapp-mcp/pull/393): faster history sync and WAL mode for the databases.
@@ -102,8 +103,10 @@ This is temporary. The plan is to merge `dev-main` into `main` at some point and
    export WHATSAPP_BRIDGE_TOKEN="$(head -c 32 /dev/urandom | base64)"
    export WHATSAPP_MEDIA_DIR="$HOME/whatsapp-outbox"   # optional; leave unset to disable sending files
    cd whatsapp-bridge
-   go run .
+   go run -tags sqlite_fts5 .
    ```
+
+   The `sqlite_fts5` tag turns on fast full-text search for `list_messages(query=...)`. Plain `go run .` also works; search then falls back to a slower scan of all messages.
 
    The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
 
@@ -166,7 +169,7 @@ If you're running this project on Windows, be aware that `go-sqlite3` requires *
    ```bash
    cd whatsapp-bridge
    go env -w CGO_ENABLED=1
-   go run .
+   go run -tags sqlite_fts5 .
    ```
 
 Without this setup, you'll likely run into errors like:

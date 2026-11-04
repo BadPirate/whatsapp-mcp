@@ -230,6 +230,23 @@ def format_messages_list(messages: List[Message], show_chat_info: bool = True) -
         output += format_message(message, show_chat_info)
     return output
 
+def _fts_ready(cursor) -> bool:
+    """True when the FTS5 index exists and is kept up to date.
+
+    The bridge creates messages_fts and its triggers only when built with
+    -tags sqlite_fts5, and drops the triggers when run without it; then the
+    index is stale, so it must not be used. Python's sqlite3 also needs FTS5.
+    """
+    cursor.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='messages_ai'")
+    if cursor.fetchone() is None:
+        return False
+    try:
+        cursor.execute("SELECT 1 FROM messages_fts LIMIT 0")
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -283,20 +300,14 @@ def list_messages(
             
         if query:
             # #280: prefer FTS5 (inverted index) over LIKE %q% (full scan).
-            # Probe for the messages_fts table; if it's present (bridge built
-            # with -tags sqlite_fts5), join it and MATCH. Otherwise fall back
-            # to the historical behavior so mismatched bridge/server versions
-            # keep working.
-            cursor.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts'"
-            )
-            if cursor.fetchone() is not None:
+            if _fts_ready(cursor):
                 query_parts.append("JOIN messages_fts ON messages_fts.rowid = messages.rowid")
                 where_clauses.append("messages_fts MATCH ?")
-                # Quote-wrap the query so FTS5 treats it as a literal phrase
-                # rather than a mini-DSL (blocks operators like AND / NEAR /
-                # column filters embedded in user input). Escape embedded ".
-                params.append('"' + query.replace('"', '""') + '"')
+                # Quote the query so FTS5 treats it as a literal phrase, not
+                # its query syntax (AND / NEAR / column filters); escape ".
+                # The trailing * makes the last word a prefix, so "meet" still
+                # finds "meeting" as it did with LIKE.
+                params.append('"' + query.replace('"', '""') + '"*')
             else:
                 where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
                 params.append(f"%{query}%")

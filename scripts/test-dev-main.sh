@@ -41,7 +41,7 @@ done
 http_code=$(curl -s -o /dev/null -w '%{http_code}' \
   -H "X-Bridge-Token: $WHATSAPP_BRIDGE_TOKEN" "$API/send" || true)
 if [[ "$http_code" == "000" ]]; then
-  echo "The bridge is not reachable at $API. Start it first: cd whatsapp-bridge && go run ." >&2
+  echo "The bridge is not reachable at $API. Start it first: cd whatsapp-bridge && go run -tags sqlite_fts5 ." >&2
   exit 1
 elif [[ "$http_code" == "401" ]]; then
   echo "The bridge rejected the token. Use the same WHATSAPP_BRIDGE_TOKEN as the bridge." >&2
