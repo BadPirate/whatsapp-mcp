@@ -171,6 +171,7 @@ def send_message(
     message: str,
     reply_to_message_id: Optional[str] = None,
     reply_to_sender_jid: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
@@ -184,6 +185,9 @@ def send_message(
         reply_to_sender_jid: JID of the original message's sender. Required for group
                  replies (WhatsApp needs to know whose message you're quoting); optional
                  for direct chats.
+        mentions: Optional list of people to @mention, as phone numbers (country code, no +)
+                 or JIDs. Also put "@<number>" for each of them in the message text,
+                 otherwise WhatsApp does not highlight the mention.
 
     Returns:
         A dictionary containing success status and a status message
@@ -200,6 +204,7 @@ def send_message(
         message,
         reply_to_message_id=reply_to_message_id,
         reply_to_sender_jid=reply_to_sender_jid,
+        mentions=mentions,
     )
     return {
         "success": success,

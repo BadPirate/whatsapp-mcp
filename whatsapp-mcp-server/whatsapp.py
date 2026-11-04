@@ -802,6 +802,7 @@ def send_message(
     message: str,
     reply_to_message_id: Optional[str] = None,
     reply_to_sender_jid: Optional[str] = None,
+    mentions: Optional[List[str]] = None,
 ) -> Tuple[bool, str]:
     try:
         # Validate input
@@ -820,6 +821,8 @@ def send_message(
             payload["reply_to_message_id"] = reply_to_message_id
         if reply_to_sender_jid:
             payload["reply_to_sender_jid"] = reply_to_sender_jid
+        if mentions:
+            payload["mentions"] = list(mentions)
 
         response = _post(url, payload)
         
