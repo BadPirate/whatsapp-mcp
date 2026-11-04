@@ -63,6 +63,8 @@ Fixes and speed:
 - `fix/document-mime-type` — upstream PR [#328](https://github.com/lharries/whatsapp-mcp/pull/328): the same fix as #390; merged for its history only.
 - `fix/voice-message-cleanup` — upstream PR [#369](https://github.com/lharries/whatsapp-mcp/pull/369): `send_audio_message` deletes the converted `.ogg` file after sending.
 - `feat/fts5-search` — upstream PR [#281](https://github.com/lharries/whatsapp-mcp/pull/281): fast full-text search in `list_messages`. Needs the bridge built with `-tags sqlite_fts5`; without it, search uses the old slow scan. A search matches whole words or the start of a word, not text in the middle of a word.
+- `feat/mcp-2x` — upstream PR [#378](https://github.com/lharries/whatsapp-mcp/pull/378): the MCP server uses mcp 2.x, so MCP clients on the 2.x protocol connect at once instead of waiting for a timeout. Needs Python 3.11 or newer.
+- `ci/github-actions` — upstream PR [#150](https://github.com/lharries/whatsapp-mcp/pull/150): GitHub Actions builds and tests the bridge (with and without full-text search) and runs the Python tests on every push.
 - `fix/gitignore-binary` — upstream PR [#349](https://github.com/lharries/whatsapp-mcp/pull/349): git ignores the compiled bridge program.
 - `fix/sqlite-indexes` — upstream PR [#279](https://github.com/lharries/whatsapp-mcp/pull/279): database indexes for faster message and chat queries.
 - `fix/sqlite-wal` — upstream PR [#393](https://github.com/lharries/whatsapp-mcp/pull/393): faster history sync and WAL mode for the databases.
@@ -81,7 +83,7 @@ This is temporary. The plan is to merge `dev-main` into `main` at some point and
 ### Prerequisites
 
 - Go
-- Python 3.6+
+- Python 3.11+ (uv installs it for you if needed)
 - Anthropic Claude Desktop app (or Cursor)
 - UV (Python package manager), install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - FFmpeg (_optional_) - Only needed for audio messages. If you want to send audio files as playable WhatsApp voice messages, they must be in `.ogg` Opus format. With FFmpeg installed, the MCP server will automatically convert non-Opus audio files. Without FFmpeg, you can still send raw audio files using the `send_file` tool.
