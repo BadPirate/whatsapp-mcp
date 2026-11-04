@@ -127,6 +127,7 @@ class Message:
     id: str
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
+    quoted_message_id: Optional[str] = None  # set when this message is a reply
 
 @dataclass
 class Chat:
@@ -200,6 +201,13 @@ def get_sender_name(sender_jid: str) -> str:
         if 'conn' in locals():
             conn.close()
 
+def _quoted_column(cursor, table: str = "messages") -> str:
+    """SQL for the quoted message ID, or NULL when the bridge has not added the
+    quoted_message_id column to messages.db yet (it does so on start)."""
+    cursor.execute("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'quoted_message_id'")
+    return f"{table}.quoted_message_id" if cursor.fetchone() else "NULL"
+
+
 def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
@@ -209,13 +217,17 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
     else:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
         
-    content_prefix = ""
-    if hasattr(message, 'media_type') and message.media_type:
+    # The ID is shown for every message, so it can be used with
+    # reply_to_message_id, react_to_message and get_message_context.
+    if message.media_type:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
+    else:
+        content_prefix = f"[Message ID: {message.id}] "
+    reply = f" (reply to {message.quoted_message_id})" if message.quoted_message_id else ""
+
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
+        output += f"From: {sender_name}{reply}: {content_prefix}{message.content}\n"
     except Exception as e:
         print(f"Error formatting message: {e}", file=sys.stderr)
     return output
@@ -266,7 +278,7 @@ def list_messages(
         cursor = conn.cursor()
         
         # Build base query
-        query_parts = ["SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
+        query_parts = [f"SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, {_quoted_column(cursor)} FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
         params = []
@@ -334,7 +346,8 @@ def list_messages(
                 is_from_me=msg[4],
                 chat_jid=msg[5],
                 id=msg[6],
-                media_type=msg[7]
+                media_type=msg[7],
+                quoted_message_id=msg[8],
             )
             result.append(message)
             
@@ -371,9 +384,11 @@ def get_message_context(
         conn = _connect()
         cursor = conn.cursor()
         
+        quoted = _quoted_column(cursor)
+
         # Get the target message first
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+        cursor.execute(f"""
+            SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type, {quoted}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.id = ?
@@ -391,12 +406,13 @@ def get_message_context(
             is_from_me=msg_data[4],
             chat_jid=msg_data[5],
             id=msg_data[6],
-            media_type=msg_data[8]
+            media_type=msg_data[8],
+            quoted_message_id=msg_data[9],
         )
         
         # Get messages before
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+        cursor.execute(f"""
+            SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, {quoted}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
@@ -414,12 +430,13 @@ def get_message_context(
                 is_from_me=msg[4],
                 chat_jid=msg[5],
                 id=msg[6],
-                media_type=msg[7]
+                media_type=msg[7],
+                quoted_message_id=msg[8],
             ))
         
         # Get messages after
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+        cursor.execute(f"""
+            SELECT messages.timestamp, messages.sender, display_name(chats.jid, chats.name), messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type, {quoted}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
@@ -437,7 +454,8 @@ def get_message_context(
                 is_from_me=msg[4],
                 chat_jid=msg[5],
                 id=msg[6],
-                media_type=msg[7]
+                media_type=msg[7],
+                quoted_message_id=msg[8],
             ))
         
         return MessageContext(
@@ -652,7 +670,7 @@ def get_last_interaction(jid: str) -> str:
         conn = _connect()
         cursor = conn.cursor()
         
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT 
                 m.timestamp,
                 m.sender,
@@ -661,7 +679,8 @@ def get_last_interaction(jid: str) -> str:
                 m.is_from_me,
                 c.jid,
                 m.id,
-                m.media_type
+                m.media_type,
+                {_quoted_column(cursor, "m")}
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
             WHERE m.sender = ? OR c.jid = ?
@@ -682,7 +701,8 @@ def get_last_interaction(jid: str) -> str:
             is_from_me=msg_data[4],
             chat_jid=msg_data[5],
             id=msg_data[6],
-            media_type=msg_data[7]
+            media_type=msg_data[7],
+            quoted_message_id=msg_data[8],
         )
         
         return format_message(message)

@@ -48,7 +48,7 @@ func TestStoreMessageWorksWithLeftoverFTSTriggers(t *testing.T) {
 		t.Fatalf("StoreChat: %v", err)
 	}
 	if err := store.StoreMessage("m1", "123@s.whatsapp.net", "123", "hello meeting", now, false,
-		"", "", "", nil, nil, nil, 0); err != nil {
+		"", "", "", nil, nil, nil, 0, ""); err != nil {
 		t.Fatalf("StoreMessage failed; leftover FTS triggers break inserts: %v", err)
 	}
 

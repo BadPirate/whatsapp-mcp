@@ -166,6 +166,7 @@ func NewMessageStore() (*MessageStore, error) {
 			file_sha256 BLOB,
 			file_enc_sha256 BLOB,
 			file_length INTEGER,
+			quoted_message_id TEXT,
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
@@ -189,6 +190,13 @@ func NewMessageStore() (*MessageStore, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %v", err)
+	}
+
+	// Migrate older databases that predate quoted_message_id (#325).
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN quoted_message_id TEXT`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate messages table: %v", err)
 	}
 
 	// #280: FTS5-backed content search. go-sqlite3 omits FTS5 by default; if
@@ -269,7 +277,7 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
-	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64, quotedMessageID string) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -277,9 +285,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 
 	_, err := store.db.Exec(
 		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, nullIfEmpty(quotedMessageID),
 	)
 	return err
 }
@@ -779,6 +787,41 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 }
 
 // Extract media info from a message
+// extractQuotedMessageID returns the ID of the message this one replies to
+// (quotes), or "". WhatsApp puts it in the ContextInfo of whichever message
+// type is set (text, image, sticker, location, ...), so look at all of them.
+func extractQuotedMessageID(msg *waProto.Message) string {
+	msg = unwrapMessage(msg)
+	if msg == nil {
+		return ""
+	}
+	id := ""
+	msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		if fd.Kind() != protoreflect.MessageKind || fd.IsList() || fd.IsMap() {
+			return true
+		}
+		inner := v.Message()
+		ctxField := inner.Descriptor().Fields().ByName("contextInfo")
+		if ctxField == nil || !inner.Has(ctxField) {
+			return true
+		}
+		if ctx, ok := inner.Get(ctxField).Message().Interface().(*waProto.ContextInfo); ok && ctx.GetStanzaID() != "" {
+			id = ctx.GetStanzaID()
+			return false
+		}
+		return true
+	})
+	return id
+}
+
+// nullIfEmpty stores "" as NULL, so "not a reply" is NULL in the database.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	// Same envelopes as in extractTextContent: a document sent with a caption
 	// arrives as DocumentWithCaptionMessage, and without unwrapping it would be
@@ -896,6 +939,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileSHA256,
 		fileEncSHA256,
 		fileLength,
+		extractQuotedMessageID(msg.Message),
 	)
 
 	if err != nil {
@@ -1601,6 +1645,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					fileSHA256,
 					fileEncSHA256,
 					fileLength,
+					extractQuotedMessageID(msg.Message.Message),
 				)
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)
