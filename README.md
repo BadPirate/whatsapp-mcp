@@ -45,6 +45,23 @@ What is in `dev-main` now:
 - `fix/media-403` — upstream PR [#361](https://github.com/lharries/whatsapp-mcp/pull/361): fixes the 403 error on `/api/download` for media.
 - `fix/media-same-name` — upstream PR [#370](https://github.com/lharries/whatsapp-mcp/pull/370): media with the same filename in a chat (such as photos sent together) each get their own file instead of overwriting each other.
 
+Security:
+
+- `fix/api-hardening` — upstream PR [#387](https://github.com/lharries/whatsapp-mcp/pull/387): the bridge API listens on `127.0.0.1` only, requires a shared token, only sends files from one folder, and keeps downloads inside `store/`. **Changes setup:** see [Bridge token and media folder](#bridge-token-and-media-folder).
+- `fix/store-permissions` — upstream PR [#389](https://github.com/lharries/whatsapp-mcp/pull/389): `store/` and its databases and media are readable by your user only.
+- `feat/read-only-mode` — upstream PR [#388](https://github.com/lharries/whatsapp-mcp/pull/388): optional [read-only mode](#read-only-mode) that hides the send tools.
+
+Fixes and speed:
+
+- `fix/logs-to-stderr` — upstream PR [#372](https://github.com/lharries/whatsapp-mcp/pull/372): the MCP server logs to stderr, so log lines no longer corrupt the MCP connection.
+- `fix/last-message-join` — upstream PR [#283](https://github.com/lharries/whatsapp-mcp/pull/283): chat lists no longer duplicate or drop chats.
+- `fix/list-chats-no-last-message` — upstream PR [#380](https://github.com/lharries/whatsapp-mcp/pull/380): `list_chats` and `get_chat` work with `include_last_message=False`.
+- `fix/contact-chats-limits-timeouts` — upstream PR [#373](https://github.com/lharries/whatsapp-mcp/pull/373): no duplicate rows in `get_contact_chats`, negative limits are rejected, and calls to the bridge time out.
+- `fix/document-mime` — upstream PR [#390](https://github.com/lharries/whatsapp-mcp/pull/390): documents are sent with their real file type and name instead of as unnamed `.bin` files.
+- `fix/gitignore-binary` — upstream PR [#349](https://github.com/lharries/whatsapp-mcp/pull/349): git ignores the compiled bridge program.
+- `fix/sqlite-indexes` — upstream PR [#279](https://github.com/lharries/whatsapp-mcp/pull/279): database indexes for faster message and chat queries.
+- `fix/sqlite-wal` — upstream PR [#393](https://github.com/lharries/whatsapp-mcp/pull/393): faster history sync and WAL mode for the databases.
+
 This is temporary. The plan is to merge `dev-main` into `main` at some point and announce that this fork is actively maintained. From then on, `main` will be the branch to use.
 
 ## Installation
@@ -62,17 +79,19 @@ This is temporary. The plan is to merge `dev-main` into `main` at some point and
 1. **Clone this repository**
 
    ```bash
-   git clone https://github.com/lharries/whatsapp-mcp.git
+   git clone -b dev-main https://github.com/erwinvaneijk/whatsapp-mcp.git
    cd whatsapp-mcp
    ```
 
 2. **Run the WhatsApp bridge**
 
-   Navigate to the whatsapp-bridge directory and run the Go application:
+   The bridge only starts with a shared secret (`WHATSAPP_BRIDGE_TOKEN`, at least 32 characters), and only sends files from one folder (`WHATSAPP_MEDIA_DIR`). See [Bridge token and media folder](#bridge-token-and-media-folder). Generate a token once and keep it; the MCP server needs the same value.
 
    ```bash
+   export WHATSAPP_BRIDGE_TOKEN="$(head -c 32 /dev/urandom | base64)"
+   export WHATSAPP_MEDIA_DIR="$HOME/whatsapp-outbox"   # optional; leave unset to disable sending files
    cd whatsapp-bridge
-   go run main.go
+   go run .
    ```
 
    The first time you run it, you will be prompted to scan a QR code. Scan the QR code with your WhatsApp mobile app to authenticate.
@@ -93,7 +112,11 @@ This is temporary. The plan is to merge `dev-main` into `main` at some point and
            "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server", // cd into the repo, run `pwd` and enter the output here + "/whatsapp-mcp-server"
            "run",
            "main.py"
-         ]
+         ],
+         "env": {
+           "WHATSAPP_BRIDGE_TOKEN": "{{SAME_TOKEN_AS_THE_BRIDGE}}",
+           "WHATSAPP_MEDIA_DIR": "{{SAME_FOLDER_AS_THE_BRIDGE}}"
+         }
        }
      }
    }
@@ -132,7 +155,7 @@ If you're running this project on Windows, be aware that `go-sqlite3` requires *
    ```bash
    cd whatsapp-bridge
    go env -w CGO_ENABLED=1
-   go run main.go
+   go run .
    ```
 
 Without this setup, you'll likely run into errors like:
@@ -140,6 +163,25 @@ Without this setup, you'll likely run into errors like:
 > `Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work.`
 
 ## Security
+
+### Bridge token and media folder
+
+The bridge's REST API is locked down. It refuses to start unless the bridge and the MCP server share a secret, and it only sends files from one folder.
+
+- `WHATSAPP_BRIDGE_TOKEN`: a random secret of at least 32 characters. Set the same value for the bridge and for the MCP server. Every request must carry it in an `X-Bridge-Token` header. Generate one with `head -c 32 /dev/urandom | base64`.
+- `WHATSAPP_MEDIA_DIR`: the only directory `send_file` and `send_audio_message` may read from. Sending files is refused when it is unset.
+- The API listens on `127.0.0.1` only, and only accepts `Content-Type: application/json`.
+- Downloaded media filenames and chat IDs are sanitised, so a sender cannot write outside `store/`.
+- Message text is stripped of control characters before it is printed to the terminal.
+- `whatsapp-bridge/store/` (session keys, messages and media) is readable by your user only.
+
+To call the API by hand, pass the token:
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/api/download \
+  -H 'Content-Type: application/json' -H "X-Bridge-Token: $WHATSAPP_BRIDGE_TOKEN" \
+  -d '{"message_id": "<id>", "chat_jid": "<chat_jid>"}'
+```
 
 ### Read-only mode
 
@@ -234,15 +276,3 @@ By default, just the metadata of the media is stored in the local database. The 
 - **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`whatsapp-bridge/store/messages.db` and `whatsapp-bridge/store/whatsapp.db`) and restart the bridge to re-authenticate.
 
 For additional Claude Desktop integration troubleshooting, see the [MCP documentation](https://modelcontextprotocol.io/quickstart/server#claude-for-desktop-integration-issues). The documentation includes helpful tips for checking logs and resolving common issues.
-
-## Security hardening
-
-The bridge's REST API is now locked down. It refuses to start unless both sides share a secret, and it only sends files from one folder.
-
-- `WHATSAPP_BRIDGE_TOKEN`: a random secret of at least 32 characters. Set the same value for the bridge and for the MCP server. Every request must carry it in an `X-Bridge-Token` header.
-- `WHATSAPP_MEDIA_DIR`: the only directory `send_file` and `send_audio_message` may read from. Media sending is refused when it is unset.
-- The API listens on `127.0.0.1` only, and only accepts `Content-Type: application/json`.
-- Downloaded media filenames and chat IDs are sanitised, so a sender cannot write outside `store/`.
-- Message text is stripped of control characters before it is printed to the terminal.
-
-Generate a token with `head -c 32 /dev/urandom | base64`.
