@@ -75,6 +75,10 @@ Contacts and messages:
 - `fix/media-captions` — upstream PR [#350](https://github.com/lharries/whatsapp-mcp/pull/350): captions on images, videos and documents are stored as the message text instead of being dropped, also for messages from history sync. Applies to newly received or re-synced messages.
 - `feat/store-non-text-messages` — upstream PR [#345](https://github.com/lharries/whatsapp-mcp/pull/345): reactions, polls, poll votes, locations, contact cards, stickers, edits and deletes are stored as short bracketed text (such as `[reaction: ❤️]` or `[edited] new text`) instead of being dropped. Applies to newly received messages.
 - `feat/reply-to-message` — upstream PR [#277](https://github.com/lharries/whatsapp-mcp/pull/277): `send_message` can reply to a specific message with `reply_to_message_id`. For group chats, also pass `reply_to_sender_jid` (the original sender).
+- `feat/send-file-caption` — upstream PR [#200](https://github.com/lharries/whatsapp-mcp/pull/200): `send_file` takes an optional `caption`, shown with the image, video or document.
+- `feat/send-mentions` — upstream PR [#321](https://github.com/lharries/whatsapp-mcp/pull/321): `send_message` takes `mentions`, a list of phone numbers or JIDs to @mention. Also put `@<number>` in the text, or WhatsApp does not highlight it. Works together with replies.
+- `feat/send-reactions` — upstream PR [#148](https://github.com/lharries/whatsapp-mcp/pull/148): new `react_to_message` tool to react with an emoji, or remove your reaction with an empty one. The message must be in the bridge's database. Hidden in read-only mode.
+- `feat/quoted-message-id` — upstream PR [#325](https://github.com/lharries/whatsapp-mcp/pull/325): replies are stored with the ID of the message they quote and shown as `(reply to <id>)`. Every message now shows its ID, to use with replies and reactions. Applies to newly received or re-synced messages.
 
 This is temporary. The plan is to merge `dev-main` into `main` at some point and announce that this fork is actively maintained. From then on, `main` will be the branch to use.
 
