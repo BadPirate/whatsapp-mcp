@@ -66,6 +66,8 @@ Contacts and messages:
 
 - `fix/contact-names-lid` — upstream PR [#375](https://github.com/lharries/whatsapp-mcp/pull/375): chats and senders show the saved contact name instead of a bare number, also for chats on WhatsApp's newer LID IDs. Searching by phone number finds LID chats too. Names come from the bridge's `whatsapp.db`; a newly saved contact can take up to 10 seconds to show up.
 - `fix/media-captions` — upstream PR [#350](https://github.com/lharries/whatsapp-mcp/pull/350): captions on images, videos and documents are stored as the message text instead of being dropped, also for messages from history sync. Applies to newly received or re-synced messages.
+- `feat/store-non-text-messages` — upstream PR [#345](https://github.com/lharries/whatsapp-mcp/pull/345): reactions, polls, poll votes, locations, contact cards, stickers, edits and deletes are stored as short bracketed text (such as `[reaction: ❤️]` or `[edited] new text`) instead of being dropped. Applies to newly received messages.
+- `feat/reply-to-message` — upstream PR [#277](https://github.com/lharries/whatsapp-mcp/pull/277): `send_message` can reply to a specific message with `reply_to_message_id`. For group chats, also pass `reply_to_sender_jid` (the original sender).
 
 This is temporary. The plan is to merge `dev-main` into `main` at some point and announce that this fork is actively maintained. From then on, `main` will be the branch to use.
 
