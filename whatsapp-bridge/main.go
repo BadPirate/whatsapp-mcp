@@ -552,6 +552,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Document types (for any other file type)
 		default:
 			mediaType = whatsmeow.MediaDocument
+			// Without a real mime type WhatsApp mobile renders the document as .bin
 			mimeType = mime.TypeByExtension("." + fileExt)
 			if mimeType == "" {
 				mimeType = "application/octet-stream"
