@@ -62,6 +62,11 @@ Fixes and speed:
 - `fix/sqlite-indexes` — upstream PR [#279](https://github.com/lharries/whatsapp-mcp/pull/279): database indexes for faster message and chat queries.
 - `fix/sqlite-wal` — upstream PR [#393](https://github.com/lharries/whatsapp-mcp/pull/393): faster history sync and WAL mode for the databases.
 
+Contacts and messages:
+
+- `fix/contact-names-lid` — upstream PR [#375](https://github.com/lharries/whatsapp-mcp/pull/375): chats and senders show the saved contact name instead of a bare number, also for chats on WhatsApp's newer LID IDs. Searching by phone number finds LID chats too. Names come from the bridge's `whatsapp.db`; a newly saved contact can take up to 10 seconds to show up.
+- `fix/media-captions` — upstream PR [#350](https://github.com/lharries/whatsapp-mcp/pull/350): captions on images, videos and documents are stored as the message text instead of being dropped, also for messages from history sync. Applies to newly received or re-synced messages.
+
 This is temporary. The plan is to merge `dev-main` into `main` at some point and announce that this fork is actively maintained. From then on, `main` will be the branch to use.
 
 ## Installation

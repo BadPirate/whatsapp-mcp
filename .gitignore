@@ -6,3 +6,7 @@ whatsapp.log
 # (whatsapp-client); building it as a service names it whatsapp-bridge.
 whatsapp-bridge/whatsapp-client
 whatsapp-bridge/whatsapp-bridge
+
+# Local secrets and WhatsApp data: session keys, message history, media
+.env
+whatsapp-bridge/store/
