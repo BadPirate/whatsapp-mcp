@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev-main, "fix/**", "feat/**", "ci/**"]
+  pull_request:
+    branches: [main, dev-main]
+
+jobs:
+  go:
+    name: Go build, vet and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: whatsapp-bridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: whatsapp-bridge/go.mod
+          cache-dependency-path: whatsapp-bridge/go.sum
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Both builds must work: full-text search is optional (see README).
+      - name: Test without FTS5
+        run: go test -timeout 120s ./...
+
+      - name: Test with FTS5
+        run: go test -tags sqlite_fts5 -timeout 300s ./...
+
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: whatsapp-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      # Uses the versions pinned in uv.lock (Python 3.11+, mcp 2.x).
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+        run: uv run --locked --with pytest pytest -v tests
