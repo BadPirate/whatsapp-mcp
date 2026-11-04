@@ -356,11 +356,15 @@ def list_chats(
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
+                {last_cols}
             FROM chats
-        """]
+        """.format(last_cols=(
+            "messages.content as last_message, messages.sender as last_sender, messages.is_from_me as last_is_from_me"
+            if include_last_message
+            # Without the JOIN the messages table is not in FROM, so selecting
+            # its columns fails; the error is caught and an empty list returned.
+            else "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+        ))]
         
         if include_last_message:
             # #282: join to the actual latest message via rowid subquery,
@@ -574,11 +578,13 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
                 c.jid,
                 c.name,
                 c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
+                {last_cols}
             FROM chats c
-        """
+        """.format(last_cols=(
+            "m.content as last_message, m.sender as last_sender, m.is_from_me as last_is_from_me"
+            if include_last_message
+            else "NULL as last_message, NULL as last_sender, NULL as last_is_from_me"
+        ))
         
         if include_last_message:
             # #282: rowid subquery instead of timestamp equality join.
