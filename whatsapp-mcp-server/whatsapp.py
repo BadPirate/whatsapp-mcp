@@ -852,6 +852,7 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, f"Unexpected error: {str(e)}"
 
 def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
+    converted_path = None
     try:
         # Validate input
         if not recipient:
@@ -868,7 +869,8 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
 
         if not media_path.endswith(".ogg"):
             try:
-                media_path = audio.convert_to_opus_ogg_temp(media_path, directory=MEDIA_DIR)
+                converted_path = audio.convert_to_opus_ogg_temp(media_path, directory=MEDIA_DIR)
+                media_path = converted_path
             except Exception as e:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
         
@@ -895,6 +897,14 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+    finally:
+        if converted_path is not None:
+            try:
+                os.unlink(converted_path)
+            except OSError:
+                # Cleanup must not replace the bridge's send result.
+                pass
+
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.
