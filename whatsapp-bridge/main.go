@@ -1193,6 +1193,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	})
 
 	// Handler for downloading media
+	registerReactHandler(mux, client, messageStore)
+
 	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {

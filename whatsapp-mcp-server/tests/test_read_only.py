@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-SEND_TOOLS = {"send_message", "send_file", "send_audio_message"}
+SEND_TOOLS = {"send_message", "send_file", "send_audio_message", "react_to_message"}
 READ_TOOLS = {
     "search_contacts", "list_messages", "list_chats", "get_chat", "get_direct_chat_by_contact",
     "get_contact_chats", "get_last_interaction", "get_message_context", "download_media",
