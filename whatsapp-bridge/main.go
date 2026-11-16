@@ -144,6 +144,11 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
 
+	if err := ensureContactTables(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create contact_names table: %v", err)
+	}
+
 	// Create tables if they don't exist
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS chats (
@@ -1238,6 +1243,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Handler for downloading media
 	registerReactHandler(mux, client, messageStore)
+	registerContactHandlers(mux, client, messageStore)
 
 	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
