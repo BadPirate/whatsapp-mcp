@@ -49,9 +49,20 @@ def _load_contacts():
     """Read saved contact names and the LID <-> phone map from the bridge's whatsmeow store.
 
     messages.db only has names for groups and a few contacts, so LID chats show up as bare numbers.
-    Returns (saved names, push/business names, lid -> phone), the names keyed by JID user part.
+    Returns (names set here, saved names, push/business names, lid -> phone), the names keyed by JID user part.
     """
     saved, fallback, lid_to_pn = {}, {}, {}
+    overrides = {}
+    # Names set with set_contact_name live in the bridge's messages.db. An older bridge has no table.
+    try:
+        conn = sqlite3.connect(f"file:{MESSAGES_DB_PATH}?mode=ro", uri=True)
+        try:
+            for jid, name in conn.execute("SELECT jid, name FROM contact_names"):
+                overrides[jid.split('@')[0]] = name
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
     try:
         conn = sqlite3.connect(f"file:{WHATSAPP_DB_PATH}?mode=ro", uri=True)
         try:
@@ -68,7 +79,7 @@ def _load_contacts():
             conn.close()
     except sqlite3.Error as e:
         print(f"Database error while loading contact names: {e}", file=sys.stderr)
-    return saved, fallback, lid_to_pn
+    return overrides, saved, fallback, lid_to_pn
 
 RESOLVER_TTL_SECONDS = 10
 _resolver_cache = (0.0, None)
@@ -83,19 +94,19 @@ def _make_resolvers():
     return resolvers
 
 def _build_resolvers():
-    saved, fallback, lid_to_pn = _load_contacts()
+    overrides, saved, fallback, lid_to_pn = _load_contacts()
     pn_to_lid = {pn: lid for lid, pn in lid_to_pn.items()}
 
     def lookup(names, user):
         return names.get(user) or names.get(lid_to_pn.get(user, '')) or names.get(pn_to_lid.get(user, ''))
 
     def display_name(jid, stored):
-        """Saved contact name, else the stored chat name, else the contact's push name."""
+        """Name set with set_contact_name, else saved contact name, else the stored chat name, else the contact's push name."""
         if not jid or jid.endswith('@g.us'):
             return stored
         user = jid.split('@')[0]
         useful_stored = None if stored == user else stored
-        return lookup(saved, user) or useful_stored or lookup(fallback, user) or stored
+        return lookup(overrides, user) or lookup(saved, user) or useful_stored or lookup(fallback, user) or stored
 
     def jid_matches(jid, phone):
         """True if the chat JID contains this phone number, directly or through the LID map."""
@@ -964,6 +975,49 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             except OSError:
                 # Cleanup must not replace the bridge's send result.
                 pass
+
+
+def _bridge_call(path: str, payload: dict, what: str) -> Tuple[bool, dict]:
+    """POST to a bridge contacts endpoint. Returns (success, the bridge's answer, or {"message": why})."""
+    try:
+        response = _post(f"{WHATSAPP_API_BASE_URL}/{path}", payload)
+        try:
+            body = response.json()
+        except ValueError:
+            return False, {"message": f"Error: HTTP {response.status_code} - {response.text}"}
+        if response.status_code != 200 or not body.get("success", False):
+            return False, {"message": body.get("message", f"Error: HTTP {response.status_code}")}
+        return True, body
+    except requests.Timeout:
+        return False, {"message": f"Timed out waiting for the WhatsApp bridge while {what}."}
+    except requests.RequestException as e:
+        return False, {"message": f"Request error: {str(e)}"}
+
+
+def list_contacts(query: str = "", limit: int = 50, page: int = 0) -> Tuple[bool, dict]:
+    """List contacts the bridge knows, with every name it has for each (local, saved, push, business)."""
+    if limit < 1 or limit > 200:
+        return False, {"message": "'limit' must be between 1 and 200"}
+    if page < 0:
+        return False, {"message": "'page' must be 0 or greater"}
+    return _bridge_call("contacts/list", {"query": query, "limit": limit, "offset": page * limit}, "listing contacts")
+
+
+def check_numbers_on_whatsapp(phone_numbers: List[str]) -> Tuple[bool, dict]:
+    """Ask WhatsApp which of up to 20 phone numbers are registered."""
+    if not phone_numbers:
+        return False, {"message": "At least one phone number is required"}
+    if len(phone_numbers) > 20:
+        return False, {"message": "At most 20 phone numbers per check"}
+    return _bridge_call("contacts/check", {"phones": phone_numbers}, "checking numbers")
+
+
+def set_contact_name(contact: str, name: str) -> Tuple[bool, str]:
+    """Give a contact a local name (empty name removes it). Returns (success, message)."""
+    if not contact or not contact.strip():
+        return False, "Contact must be a phone number or a JID"
+    ok, body = _bridge_call("contacts/set", {"contact": contact, "name": name}, "saving the name")
+    return ok, body.get("message", "Unknown response")
 
 
 def react_to_message(message_id: str, chat_jid: str, emoji: str) -> Tuple[bool, str]:
