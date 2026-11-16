@@ -47,10 +47,22 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
+def _local_contact_name(conn, jid: str) -> Optional[str]:
+    """The name set with set_contact_name for this JID, if any (older bridges have no such table)."""
+    try:
+        row = conn.execute("SELECT name FROM contact_names WHERE jid = ?", (jid,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
 def get_sender_name(sender_jid: str) -> str:
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
+
+        local_name = _local_contact_name(conn, sender_jid)
+        if local_name:
+            return local_name
         
         # First try matching by exact JID
         cursor.execute("""
@@ -417,7 +429,7 @@ def search_contacts(query: str) -> List[Contact]:
         for contact_data in contacts:
             contact = Contact(
                 phone_number=contact_data[0].split('@')[0],
-                name=contact_data[1],
+                name=_local_contact_name(conn, contact_data[0]) or contact_data[1],
                 jid=contact_data[0]
             )
             result.append(contact)
@@ -621,6 +633,45 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     finally:
         if 'conn' in locals():
             conn.close()
+
+def _bridge_call(path: str, payload: dict, what: str) -> Tuple[bool, dict]:
+    """POST to a bridge contacts endpoint. Returns (success, the bridge's answer, or {"message": why})."""
+    try:
+        response = requests.post(f"{WHATSAPP_API_BASE_URL}/{path}", json=payload, timeout=(5, 60))
+        try:
+            body = response.json()
+        except ValueError:
+            return False, {"message": f"Error: HTTP {response.status_code} - {response.text}"}
+        if response.status_code != 200 or not body.get("success", False):
+            return False, {"message": body.get("message", f"Error: HTTP {response.status_code}")}
+        return True, body
+    except requests.Timeout:
+        return False, {"message": f"Timed out waiting for the WhatsApp bridge while {what}."}
+    except requests.RequestException as e:
+        return False, {"message": f"Request error: {str(e)}"}
+
+def list_contacts(query: str = "", limit: int = 50, page: int = 0) -> Tuple[bool, dict]:
+    """List contacts the bridge knows, with every name it has for each (local, saved, push, business)."""
+    if limit < 1 or limit > 200:
+        return False, {"message": "'limit' must be between 1 and 200"}
+    if page < 0:
+        return False, {"message": "'page' must be 0 or greater"}
+    return _bridge_call("contacts/list", {"query": query, "limit": limit, "offset": page * limit}, "listing contacts")
+
+def check_numbers_on_whatsapp(phone_numbers: List[str]) -> Tuple[bool, dict]:
+    """Ask WhatsApp which of up to 20 phone numbers are registered."""
+    if not phone_numbers:
+        return False, {"message": "At least one phone number is required"}
+    if len(phone_numbers) > 20:
+        return False, {"message": "At most 20 phone numbers per check"}
+    return _bridge_call("contacts/check", {"phones": phone_numbers}, "checking numbers")
+
+def set_contact_name(contact: str, name: str) -> Tuple[bool, str]:
+    """Give a contact a local name (empty name removes it). Returns (success, message)."""
+    if not contact or not contact.strip():
+        return False, "Contact must be a phone number or a JID"
+    ok, body = _bridge_call("contacts/set", {"contact": contact, "name": name}, "saving the name")
+    return ok, body.get("message", "Unknown response")
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     try:

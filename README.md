@@ -129,6 +129,9 @@ Once connected, you can interact with your WhatsApp contacts through Claude, lev
 Claude can access the following tools to interact with WhatsApp:
 
 - **search_contacts**: Search for contacts by name or phone number
+- **list_contacts**: List contacts with every name held for each (local, saved, push, business) (read-only)
+- **check_whatsapp_numbers**: Check whether 1 to 20 phone numbers are registered on WhatsApp (read-only; sends nothing to the numbers)
+- **set_contact_name**: Give a contact a name, or remove it with an empty name (see [Contact names](#contact-names))
 - **list_messages**: Retrieve messages with optional filters and context
 - **list_chats**: List available chats with metadata
 - **get_chat**: Get information about a specific chat
@@ -140,6 +143,14 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_file**: Send a file (image, video, raw audio, document) to a specified recipient
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
+
+### Contact names
+
+`list_contacts` and `check_whatsapp_numbers` are read-only. `set_contact_name` changes data but is not destructive and can be repeated safely.
+
+What "edit" means: **`set_contact_name` keeps a local name in the bridge's own `store/messages.db` (table `contact_names`).** `search_contacts`, the sender names in messages and `list_contacts` show it instead of the saved or push name. It does not change your phone's address book or your WhatsApp contacts, and nobody else sees it. whatsmeow can read contact changes that sync from the phone, but it has no call to write one back, so pushing a name to the phone is not supported. Remove a name by calling the tool with an empty name. Groups cannot be named, and a name is at most 100 characters with no control or invisible characters.
+
+The bridge serves these through `POST /api/contacts/list` (`query`, `limit` 1 to 200, `offset`), `POST /api/contacts/check` (`phones`, at most 20, international format) and `POST /api/contacts/set` (`contact`: a phone number or a person's JID; `name`).
 
 ### Media Handling Features
 
