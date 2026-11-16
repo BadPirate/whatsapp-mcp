@@ -18,7 +18,7 @@ Here's an example of what you can do when it's connected to Claude.
 
 ### Prerequisites
 
-- Go
+- Go 1.26 or newer (needed by the current whatsmeow)
 - Python 3.6+
 - Anthropic Claude Desktop app (or Cursor)
 - UV (Python package manager), install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
