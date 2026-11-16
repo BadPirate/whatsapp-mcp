@@ -138,16 +138,35 @@ func parseContactTarget(s string) (types.JID, error) {
 	return types.NewJID(strings.TrimPrefix(phone, "+"), types.DefaultUserServer), nil
 }
 
+// badRequestError is a problem with what the caller sent; its text is safe to
+// answer. Any other error is an internal one and is only logged.
+type badRequestError struct{ msg string }
+
+func (e badRequestError) Error() string { return e.msg }
+
+func badRequest(format string, args ...any) error {
+	return badRequestError{fmt.Sprintf(format, args...)}
+}
+
 // cleanContactName trims a name and refuses one that is too long or holds
-// characters that do not show on screen.
+// characters that do not show on screen. An empty name, exactly "", means
+// "remove the local name"; a name of only white space is refused, so a stray
+// space cannot delete one.
 func cleanContactName(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
 	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("name is only white space; send an empty name to remove the local name")
+	}
 	if utf8.RuneCountInString(name) > maxContactNameLen {
 		return "", fmt.Errorf("name is longer than %d characters", maxContactNameLen)
 	}
 	for _, r := range name {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return "", errors.New("name has a control or invisible character")
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) ||
+			unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || (unicode.IsSpace(r) && r != ' ') {
+			return "", errors.New("name has a control, invisible or line-breaking character")
 		}
 	}
 	return name, nil
@@ -194,7 +213,7 @@ func listContacts(ctx context.Context, contacts contactStoreReader, lids phoneRe
 		limit = maxContactLimit
 	}
 	if offset < 0 {
-		return nil, errors.New("offset must be 0 or greater")
+		return nil, badRequest("offset must be 0 or greater")
 	}
 	all, err := contacts.GetAllContacts(ctx)
 	if err != nil {
@@ -205,27 +224,38 @@ func listContacts(ctx context.Context, contacts contactStoreReader, lids phoneRe
 		return nil, fmt.Errorf("reading local names: %w", err)
 	}
 
+	// The phone number behind each LID, so a name set for the number shows on
+	// the LID's contact and the number is not listed a second time.
+	phoneOf := func(jid types.JID) string {
+		switch jid.Server {
+		case types.DefaultUserServer:
+			return jid.User
+		case types.HiddenUserServer:
+			if lids != nil {
+				if pn, err := lids.GetPNForLID(ctx, jid); err == nil && !pn.IsEmpty() {
+					return pn.User
+				}
+			}
+		}
+		return ""
+	}
 	views := make([]ContactView, 0, len(all))
 	seen := map[string]bool{}
+	seenPhone := map[string]bool{}
 	build := func(jid types.JID, info types.ContactInfo) ContactView {
+		localName := local[jid.String()]
+		if pn := phoneOf(jid); localName == "" && pn != "" {
+			localName = local[types.NewJID(pn, types.DefaultUserServer).String()]
+		}
 		v := ContactView{
 			JID:          jid.String(),
-			LocalName:    local[jid.String()],
+			LocalName:    localName,
 			SavedName:    firstNonEmpty(info.FullName, info.FirstName),
 			PushName:     info.PushName,
 			BusinessName: info.BusinessName,
 		}
 		v.Name = firstNonEmpty(v.LocalName, v.SavedName, v.PushName, v.BusinessName)
-		switch jid.Server {
-		case types.DefaultUserServer:
-			v.PhoneNumber = jid.User
-		case types.HiddenUserServer:
-			if lids != nil {
-				if pn, err := lids.GetPNForLID(ctx, jid); err == nil && !pn.IsEmpty() {
-					v.PhoneNumber = pn.User
-				}
-			}
-		}
+		v.PhoneNumber = phoneOf(jid)
 		return v
 	}
 	for jid, info := range all {
@@ -233,15 +263,23 @@ func listContacts(ctx context.Context, contacts contactStoreReader, lids phoneRe
 			continue
 		}
 		seen[jid.String()] = true
+		if pn := phoneOf(jid); pn != "" {
+			seenPhone[pn] = true
+		}
 		views = append(views, build(jid, info))
 	}
 	for jidStr := range local {
 		if seen[jidStr] {
 			continue
 		}
-		if jid, err := types.ParseJID(jidStr); err == nil {
-			views = append(views, build(jid, types.ContactInfo{}))
+		jid, err := types.ParseJID(jidStr)
+		if err != nil {
+			continue
 		}
+		if pn := phoneOf(jid); pn != "" && seenPhone[pn] {
+			continue // already listed under its other address
+		}
+		views = append(views, build(jid, types.ContactInfo{}))
 	}
 
 	q := strings.ToLower(strings.TrimSpace(query))
@@ -291,10 +329,10 @@ func firstNonEmpty(values ...string) string {
 // sent to WhatsApp.
 func checkNumbers(ctx context.Context, checker numberChecker, phones []string) ([]NumberCheck, error) {
 	if len(phones) == 0 {
-		return nil, errors.New("phones is required")
+		return nil, badRequest("phones is required")
 	}
 	if len(phones) > maxCheckNumbers {
-		return nil, fmt.Errorf("at most %d numbers per check", maxCheckNumbers)
+		return nil, badRequest("at most %d numbers per check", maxCheckNumbers)
 	}
 	results := make([]NumberCheck, len(phones))
 	var valid []string
@@ -349,6 +387,18 @@ func writeAPIError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"success": false, "message": msg})
 }
 
+// writeFailure answers an error: a badRequestError as a 400 with its text,
+// anything else (sqlite, WhatsApp) as a generic 500, with the detail logged.
+func writeFailure(w http.ResponseWriter, what string, err error) {
+	var bad badRequestError
+	if errors.As(err, &bad) {
+		writeAPIError(w, http.StatusBadRequest, bad.Error())
+		return
+	}
+	fmt.Printf("Contacts: %s failed: %v\n", what, err)
+	writeAPIError(w, http.StatusInternalServerError, "Could not complete the request; see the bridge log")
+}
+
 // registerContactHandlers adds POST /api/contacts/list, /api/contacts/check
 // and /api/contacts/set. They sit behind the same token check as the other
 // endpoints.
@@ -371,7 +421,7 @@ func registerContactHandlers(mux *http.ServeMux, client *whatsmeow.Client, messa
 		}
 		contacts, err := listContacts(r.Context(), client.Store.Contacts, client.Store.LIDs, messageStore, req.Query, req.Limit, req.Offset)
 		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, err.Error())
+			writeFailure(w, "listing contacts", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "contacts": contacts})
@@ -393,7 +443,7 @@ func registerContactHandlers(mux *http.ServeMux, client *whatsmeow.Client, messa
 		}
 		results, err := checkNumbers(r.Context(), client, req.Phones)
 		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, err.Error())
+			writeFailure(w, "checking numbers", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"success": true, "results": results})
@@ -416,7 +466,7 @@ func registerContactHandlers(mux *http.ServeMux, client *whatsmeow.Client, messa
 			return
 		}
 		if err := messageStore.setLocalContactName(jid, name); err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "Error saving the name: "+err.Error())
+			writeFailure(w, "saving a contact name", err)
 			return
 		}
 		fmt.Println("Contact name changed for", cleanForLog(jid.String()))

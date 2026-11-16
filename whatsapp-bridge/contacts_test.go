@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -80,10 +82,15 @@ func TestCleanContactName(t *testing.T) {
 	if got, err := cleanContactName("  Frela (water heater) "); err != nil || got != "Frela (water heater)" {
 		t.Errorf("got %q, %v", got, err)
 	}
-	if got, err := cleanContactName("   "); err != nil || got != "" {
-		t.Errorf("blank name should clear: %q, %v", got, err)
+	if got, err := cleanContactName(""); err != nil || got != "" {
+		t.Errorf("an empty name removes the local name: %q, %v", got, err)
 	}
-	for _, bad := range []string{strings.Repeat("a", 101), "a\nb", "a‮b", "a​b"} {
+	for _, blank := range []string{" ", "   ", "\u00a0", "\u2028", "\u3000"} {
+		if _, err := cleanContactName(blank); err == nil {
+			t.Errorf("cleanContactName(%q): white space only must be refused, not delete the name", blank)
+		}
+	}
+	for _, bad := range []string{strings.Repeat("a", 101), "a\nb", "a\u202eb", "a\u200bb", "a\u2028b", "a\u2029b", "a\u00a0b", "a\tb"} {
 		if _, err := cleanContactName(bad); err == nil {
 			t.Errorf("cleanContactName(%q): want an error", bad)
 		}
@@ -193,4 +200,77 @@ func TestCheckNumbers(t *testing.T) {
 	if _, err := checkNumbers(context.Background(), failing, []string{"+31653275958"}); err == nil {
 		t.Error("WhatsApp failure: want an error")
 	}
+}
+
+// fakeLIDMap maps LIDs to phone numbers.
+type fakeLIDMap map[string]string
+
+func (f fakeLIDMap) GetPNForLID(_ context.Context, lid types.JID) (types.JID, error) {
+	if pn, ok := f[lid.User]; ok {
+		return types.NewJID(pn, types.DefaultUserServer), nil
+	}
+	return types.EmptyJID, nil
+}
+
+func TestLocalNameForPhoneShowsOnLIDContact(t *testing.T) {
+	store := newContactTestStore(t)
+	lid := types.NewJID("555", types.HiddenUserServer)
+	contacts := fakeContacts{lid: {Found: true, PushName: "Frela Verwarming"}}
+	lids := fakeLIDMap{"555": "31653275958"}
+	phone := types.NewJID("31653275958", types.DefaultUserServer)
+	if err := store.setLocalContactName(phone, "Frela (water heater)"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := listContacts(context.Background(), contacts, lids, store, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].JID != lid.String() || got[0].Name != "Frela (water heater)" || got[0].PhoneNumber != "31653275958" {
+		t.Fatalf("want one LID contact with the local name, got %+v", got)
+	}
+
+	// A name stored under the LID, with the contact known by phone number, lists once too.
+	if err := store.setLocalContactName(phone, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setLocalContactName(lid, "Via LID"); err != nil {
+		t.Fatal(err)
+	}
+	contacts = fakeContacts{phone: {Found: true, PushName: "Frela"}}
+	got, err = listContacts(context.Background(), contacts, lids, store, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("the number is listed twice: %+v", got)
+	}
+}
+
+func TestListErrorsAreClassified(t *testing.T) {
+	store := newContactTestStore(t)
+	_, err := listContacts(context.Background(), fakeContacts{}, nil, store, "", 10, -1)
+	var bad badRequestError
+	if !errors.As(err, &bad) {
+		t.Errorf("a bad offset is the caller's: %v", err)
+	}
+	_, err = listContacts(context.Background(), failingContacts{}, nil, store, "", 10, 0)
+	if err == nil || errors.As(err, &bad) {
+		t.Errorf("a store failure is internal: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	writeFailure(rec, "listing contacts", errors.New("sqlite: disk I/O error at /secret/path"))
+	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "sqlite") || strings.Contains(rec.Body.String(), "/secret") {
+		t.Errorf("internal detail leaked: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	writeFailure(rec, "x", badRequest("offset must be 0 or greater"))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "offset") {
+		t.Errorf("bad request: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type failingContacts struct{}
+
+func (failingContacts) GetAllContacts(context.Context) (map[types.JID]types.ContactInfo, error) {
+	return nil, errors.New("database is locked")
 }

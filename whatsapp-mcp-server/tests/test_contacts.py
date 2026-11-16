@@ -124,3 +124,15 @@ def test_tool_annotations(monkeypatch):
         assert all(p.get("title") is not None or "type" in p or "anyOf" in p for p in schema["properties"].values())
     assert tools["set_contact_name"].input_schema["required"] == ["contact", "name"]
     assert tools["check_whatsapp_numbers"].input_schema["required"] == ["phone_numbers"]
+
+
+def test_bounds_are_in_the_schema(monkeypatch):
+    monkeypatch.delenv("WHATSAPP_MCP_READ_ONLY", raising=False)
+    sys.modules.pop("main", None)
+    import main
+    tools = {t.name: t for t in asyncio.run(main.mcp.list_tools())}
+    limit = tools["list_contacts"].input_schema["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"]) == (1, 200)
+    assert tools["list_contacts"].input_schema["properties"]["page"]["minimum"] == 0
+    numbers = tools["check_whatsapp_numbers"].input_schema["properties"]["phone_numbers"]
+    assert numbers["maxItems"] == 20 and numbers["minItems"] == 1

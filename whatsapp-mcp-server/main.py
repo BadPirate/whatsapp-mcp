@@ -1,7 +1,8 @@
 import os
-from typing import List, Dict, Any, Optional
+from typing import Annotated, List, Dict, Any, Optional
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from whatsapp import Chat, Contact, MessageContext
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
@@ -46,7 +47,11 @@ def search_contacts(query: str) -> List[Contact]:
     return contacts
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
-def list_contacts(query: str = "", limit: int = 50, page: int = 0) -> Dict[str, Any]:
+def list_contacts(
+    query: str = "",
+    limit: Annotated[int, Field(ge=1, le=200, description="Contacts per page, 1 to 200")] = 50,
+    page: Annotated[int, Field(ge=0, description="Page number, starting at 0")] = 0,
+) -> Dict[str, Any]:
     """List WhatsApp contacts with every name the bridge holds for each.
 
     Each contact has: jid, phone_number (when known), name (the one shown: local, else saved,
@@ -66,7 +71,9 @@ def list_contacts(query: str = "", limit: int = 50, page: int = 0) -> Dict[str, 
     return {"success": True, "contacts": body.get("contacts", [])}
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def check_whatsapp_numbers(phone_numbers: List[str]) -> Dict[str, Any]:
+def check_whatsapp_numbers(
+    phone_numbers: Annotated[List[str], Field(min_length=1, max_length=20, description="1 to 20 phone numbers in international format")],
+) -> Dict[str, Any]:
     """Check whether phone numbers are registered on WhatsApp, before messaging them.
 
     Asks WhatsApp's servers; nothing is sent to the numbers. Each result has query,
@@ -94,7 +101,7 @@ def set_contact_name(contact: str, name: str) -> Dict[str, Any]:
         contact: A phone number in international format ("+31653275958") or a person's JID
             ("31653275958@s.whatsapp.net" or "...@lid"); groups cannot be named here
         name: The name to show, at most 100 characters (for example "Frela (water heater)");
-            empty to remove the local name
+            exactly empty to remove the local name; a name of only white space is refused
     """
     success, status_message = whatsapp_set_contact_name(contact, name)
     return {"success": success, "message": status_message}
