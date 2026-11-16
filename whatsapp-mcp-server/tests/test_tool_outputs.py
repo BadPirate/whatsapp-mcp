@@ -35,6 +35,9 @@ CALLS = {
     "send_file": {"recipient": CHAT, "media_path": "PHOTO", "caption": "look"},
     "send_audio_message": {"recipient": CHAT, "media_path": "VOICE"},
     "react_to_message": {"message_id": "M1", "chat_jid": CHAT, "emoji": "👍"},
+    "list_contacts": {"query": "Sien", "limit": 5},
+    "check_whatsapp_numbers": {"phone_numbers": ["+31612345678"]},
+    "set_contact_name": {"contact": "+31612345678", "name": "Sien (buren)"},
 }
 
 # Lookups that find nothing return None; that must not be an error either.

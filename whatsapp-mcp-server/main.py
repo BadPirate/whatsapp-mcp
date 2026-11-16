@@ -1,6 +1,8 @@
 import os
-from typing import List, Dict, Any, Optional
+from typing import Annotated, List, Dict, Any, Optional
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
+from pydantic import Field
 from whatsapp import Chat, Contact, MessageContext
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
@@ -15,7 +17,10 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
-    react_to_message as whatsapp_react_to_message
+    react_to_message as whatsapp_react_to_message,
+    list_contacts as whatsapp_list_contacts,
+    check_numbers_on_whatsapp as whatsapp_check_numbers,
+    set_contact_name as whatsapp_set_contact_name,
 )
 
 # Initialize the MCP server
@@ -25,11 +30,11 @@ mcp = MCPServer("whatsapp")
 READ_ONLY = os.environ.get("WHATSAPP_MCP_READ_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def send_tool():
-    """Register a tool that sends messages, unless read-only mode is enabled."""
+def send_tool(**tool_kwargs):
+    """Register a tool that sends messages or changes data, unless read-only mode is enabled."""
     if READ_ONLY:
         return lambda func: func
-    return mcp.tool()
+    return mcp.tool(**tool_kwargs)
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Contact]:
@@ -40,6 +45,66 @@ def search_contacts(query: str) -> List[Contact]:
     """
     contacts = whatsapp_search_contacts(query)
     return contacts
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+def list_contacts(
+    query: str = "",
+    limit: Annotated[int, Field(ge=1, le=200, description="Contacts per page, 1 to 200")] = 50,
+    page: Annotated[int, Field(ge=0, description="Page number, starting at 0")] = 0,
+) -> Dict[str, Any]:
+    """List WhatsApp contacts with every name the bridge holds for each.
+
+    Each contact has: jid, phone_number (when known), name (the one shown: local, else saved,
+    else push, else business), local_name (set with set_contact_name), saved_name (from the
+    phone's address book, synced by WhatsApp), push_name (the name the person chose for
+    themselves) and business_name. Sorted by name. Use check_whatsapp_numbers to ask whether
+    a number is registered on WhatsApp.
+
+    Args:
+        query: Optional text matched against any of the names and the phone number
+        limit: Contacts per page, 1 to 200 (default 50)
+        page: Page number, starting at 0
+    """
+    success, body = whatsapp_list_contacts(query, limit, page)
+    if not success:
+        return {"success": False, "message": body.get("message", "Unknown error")}
+    return {"success": True, "contacts": body.get("contacts", [])}
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def check_whatsapp_numbers(
+    phone_numbers: Annotated[List[str], Field(min_length=1, max_length=20, description="1 to 20 phone numbers in international format")],
+) -> Dict[str, Any]:
+    """Check whether phone numbers are registered on WhatsApp, before messaging them.
+
+    Asks WhatsApp's servers; nothing is sent to the numbers. Each result has query,
+    is_on_whatsapp, and for a registered number its jid, phone_number and, for a business,
+    verified_name. A number that is not valid international format gets an error entry.
+
+    Args:
+        phone_numbers: 1 to 20 numbers in international format with the country code,
+            such as "+31653275958" (spaces, dashes and brackets are ignored)
+    """
+    success, body = whatsapp_check_numbers(phone_numbers)
+    if not success:
+        return {"success": False, "message": body.get("message", "Unknown error")}
+    return {"success": True, "results": body.get("results", [])}
+
+@send_tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+def set_contact_name(contact: str, name: str) -> Dict[str, Any]:
+    """Save or rename a contact in this server's own contact names.
+
+    The name is kept by the bridge and shown by list_chats, search_contacts, list_messages
+    and list_contacts instead of the saved or push name. It does NOT change the phone's
+    address book or WhatsApp: the person's phone never sees it. Use an empty name to remove it.
+
+    Args:
+        contact: A phone number in international format ("+31653275958") or a person's JID
+            ("31653275958@s.whatsapp.net" or "...@lid"); groups cannot be named here
+        name: The name to show, at most 100 characters (for example "Frela (water heater)");
+            exactly empty to remove the local name; a name of only white space is refused
+    """
+    success, status_message = whatsapp_set_contact_name(contact, name)
+    return {"success": success, "message": status_message}
 
 @mcp.tool()
 def list_messages(
