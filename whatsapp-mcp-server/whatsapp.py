@@ -120,6 +120,29 @@ def _build_resolvers():
 
     return display_name, jid_matches, phone_number
 
+def equivalent_jids(jid):
+    """A chat's JID and its other address (phone number or LID, by the LID map), the JID itself first.
+
+    The bridge stores a direct chat under its LID; a caller that has the phone-number JID still finds it.
+    """
+    user, _, server = jid.partition('@')
+    try:
+        _, _, _, lid_to_pn = _load_contacts()
+    except Exception:
+        return [jid]
+    if server == 's.whatsapp.net':
+        others = [f"{lid}@lid" for lid, pn in lid_to_pn.items() if pn == user]
+    elif server == 'lid' and user in lid_to_pn:
+        others = [f"{lid_to_pn[user]}@s.whatsapp.net"]
+    else:
+        others = []
+    return [jid] + others
+
+
+def _in_clause(values):
+    return "(" + ", ".join("?" for _ in values) + ")"
+
+
 def _connect():
     """Open messages.db with display_name() and jid_matches() available in SQL."""
     display_name, jid_matches, _ = _make_resolvers()
@@ -139,6 +162,7 @@ class Message:
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
     quoted_message_id: Optional[str] = None  # set when this message is a reply
+    placeholder: bool = False  # the bridge stored a stand-in: it could not read the message
 
     def __post_init__(self):
         # SQLite returns 0/1; the declared type (and the MCP output) is a bool.
@@ -227,6 +251,20 @@ def _quoted_column(cursor, table: str = "messages") -> str:
     return f"{table}.quoted_message_id" if cursor.fetchone() else "NULL"
 
 
+def _mark_placeholders(cursor, messages) -> None:
+    """Set .placeholder on the messages the bridge stored as stand-ins (messages.placeholder = 1)."""
+    cursor.execute("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'placeholder'")
+    if not cursor.fetchone():
+        return
+    for message in messages:
+        cursor.execute("SELECT placeholder FROM messages WHERE id = ? AND chat_jid = ?", (message.id, message.chat_jid))
+        row = cursor.fetchone()
+        message.placeholder = bool(row and row[0])
+
+
+PLACEHOLDER_MARK = "(placeholder: the bridge could not read this message, so what the person wrote is unknown)"
+
+
 def format_message(message: Message, show_chat_info: bool = True) -> str:
     """Print a single message with consistent formatting."""
     output = ""
@@ -246,7 +284,8 @@ def format_message(message: Message, show_chat_info: bool = True) -> str:
 
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}{reply}: {content_prefix}{message.content}\n"
+        content = f"{PLACEHOLDER_MARK} {message.content}" if message.placeholder else message.content
+        output += f"From: {sender_name}{reply}: {content_prefix}{content}\n"
     except Exception as e:
         print(f"Error formatting message: {e}", file=sys.stderr)
     return output
@@ -285,13 +324,15 @@ HISTORY_CAVEAT = (
 )
 
 
-def history_note(cursor, chat_jids) -> str:
+def history_note(cursor, chat_jids, filtered: bool = False) -> str:
     """A note for list_messages' answer: what each chat's stored history covers, and that it may have gaps.
 
     The first stored message being one from the other side is a sign the owner's own opening
     message is missing, so that is said too.
     """
     lines = [HISTORY_CAVEAT]
+    if filtered:
+        lines.append("The ranges below cover each chat's whole stored history, not only the messages matching this search or date range.")
     for jid in chat_jids:
         cursor.execute(
             "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM messages WHERE chat_jid = ?", (jid,))
@@ -357,8 +398,9 @@ def list_messages(
             params.append(sender_phone_number)
             
         if chat_jid:
-            where_clauses.append("messages.chat_jid = ?")
-            params.append(chat_jid)
+            jids = equivalent_jids(chat_jid)
+            where_clauses.append(f"messages.chat_jid IN {_in_clause(jids)}")
+            params.extend(jids)
             
         if query:
             # #280: prefer FTS5 (inverted index) over LIKE %q% (full scan).
@@ -401,6 +443,7 @@ def list_messages(
             )
             result.append(message)
             
+        _mark_placeholders(cursor, result)
         if include_context and result:
             # Add context for each message
             messages_with_context = []
@@ -416,8 +459,9 @@ def list_messages(
             # Format and display messages without context
             output = format_messages_list(result, show_chat_info=True)
             shown = result
-        chat_jids = [chat_jid] if chat_jid else list(dict.fromkeys(m.chat_jid for m in shown))
-        return output + "\n\n" + history_note(cursor, chat_jids[:5])
+        chat_jids = equivalent_jids(chat_jid) if chat_jid else list(dict.fromkeys(m.chat_jid for m in shown))
+        filtered = bool(after or before or query or sender_phone_number)
+        return output + "\n\n" + history_note(cursor, chat_jids[:5], filtered)
         
     except sqlite3.Error as e:
         print(f"Database error: {e}", file=sys.stderr)
@@ -512,6 +556,7 @@ def get_message_context(
                 quoted_message_id=msg[8],
             ))
         
+        _mark_placeholders(cursor, [target_message, *before_messages, *after_messages])
         return MessageContext(
             message=target_message,
             before=before_messages,
@@ -673,6 +718,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         # Find the matching chats first and only then attach the last message.
         # Joining on every message (and relying on DISTINCT) returned one row
         # per message the contact had sent, not one per chat.
+        jids = equivalent_jids(jid)
         cursor.execute("""
             SELECT
                 c.jid,
@@ -688,11 +734,11 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
-            WHERE c.jid = ?
+            WHERE c.jid IN {jids_in}
                 OR c.jid IN (SELECT chat_jid FROM messages WHERE sender = ?)
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
-        """, (jid, jid, limit, page * limit))
+        """.replace("{jids_in}", _in_clause(jids)), (*jids, jid, limit, page * limit))
         
         chats = cursor.fetchall()
         
@@ -737,10 +783,10 @@ def get_last_interaction(jid: str) -> Optional[str]:
                 {_quoted_column(cursor, "m")}
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender = ? OR c.jid IN {_in_clause(equivalent_jids(jid))}
             ORDER BY m.timestamp DESC
             LIMIT 1
-        """, (jid, jid))
+        """, (jid, *equivalent_jids(jid)))
         
         msg_data = cursor.fetchone()
         
@@ -799,9 +845,10 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
                 )
             """
             
-        query += " WHERE c.jid = ?"
+        jids = equivalent_jids(chat_jid)
+        query += f" WHERE c.jid IN {_in_clause(jids)} ORDER BY c.last_message_time DESC"
         
-        cursor.execute(query, (chat_jid,))
+        cursor.execute(query, tuple(jids))
         chat_data = cursor.fetchone()
         
         if not chat_data:

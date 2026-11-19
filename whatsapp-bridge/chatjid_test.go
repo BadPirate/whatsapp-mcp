@@ -150,7 +150,96 @@ func TestHasUserVisiblePayload(t *testing.T) {
 	if hasUserVisiblePayload(nil) {
 		t.Error("nil")
 	}
-	if !hasUserVisiblePayload(&waProto.Message{CallLogMesssage: &waProto.CallLogMessage{}}) {
-		t.Error("a call log is visible")
+	if !hasUserVisiblePayload(&waProto.Message{OrderMessage: &waProto.OrderMessage{}}) {
+		t.Error("an order is visible")
+	}
+}
+
+func TestMergeKeepsRealMessageOverPlaceholder(t *testing.T) {
+	s := newTestStore(t)
+	t0 := time.Date(2026, 11, 12, 7, 47, 56, 0, time.UTC)
+	pn, lid := "31629806991@s.whatsapp.net", "239062275358755@lid"
+	s.StoreChat(pn, "Cris", t0)
+	s.StoreChat(lid, "239062275358755", t0)
+	s.StoreMessage("M1", pn, "me", "the real text", t0, true, "", "", "", nil, nil, nil, 0, "Q1")
+	if err := s.StorePlaceholder("M1", lid, "me", "[message could not be decrypted yet]", t0, true); err != nil {
+		t.Fatal(err)
+	}
+	// A placeholder in the phone-number chat never beats a real LID row.
+	s.StoreMessage("M2", lid, "x", "real lid", t0, false, "", "", "", nil, nil, nil, 0, "")
+	s.StorePlaceholder("M2", pn, "x", "[unsupported message]", t0, false)
+
+	if _, err := s.mergePNChats(context.Background(), fakePNtoLID{"31629806991": "239062275358755"}); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	var ph int
+	var quoted *string
+	s.db.QueryRow(`SELECT content, placeholder, quoted_message_id FROM messages WHERE id='M1' AND chat_jid=?`, lid).Scan(&content, &ph, &quoted)
+	if content != "the real text" || ph != 0 || quoted == nil || *quoted != "Q1" {
+		t.Errorf("M1 = %q placeholder=%d quoted=%v", content, ph, quoted)
+	}
+	s.db.QueryRow(`SELECT content, placeholder FROM messages WHERE id='M2' AND chat_jid=?`, lid).Scan(&content, &ph)
+	if content != "real lid" || ph != 0 {
+		t.Errorf("M2 = %q placeholder=%d", content, ph)
+	}
+	var name string
+	s.db.QueryRow(`SELECT name FROM chats WHERE jid=?`, lid).Scan(&name)
+	if name != "Cris" {
+		t.Errorf("digit-only LID name should give way to the PN chat's: %q", name)
+	}
+}
+
+func TestRealMessageReplacesPlaceholder(t *testing.T) {
+	s := newTestStore(t)
+	t0 := time.Now().UTC()
+	s.StoreChat("a@lid", "A", t0)
+	s.StorePlaceholder("X", "a@lid", "me", "[message could not be decrypted yet]", t0, true)
+	s.StoreMessage("X", "a@lid", "me", "hello", t0, true, "", "", "", nil, nil, nil, 0, "")
+	var content string
+	var ph int
+	s.db.QueryRow(`SELECT content, placeholder FROM messages WHERE id='X'`).Scan(&content, &ph)
+	if content != "hello" || ph != 0 {
+		t.Errorf("got %q placeholder=%d", content, ph)
+	}
+}
+
+func TestMergeKeepsRealLIDName(t *testing.T) {
+	s := newTestStore(t)
+	t0 := time.Now().UTC()
+	s.StoreChat("1@s.whatsapp.net", "Old PN name", t0)
+	s.StoreChat("2@lid", "Real Name", t0)
+	s.mergePNChats(context.Background(), fakePNtoLID{"1": "2"})
+	var name string
+	s.db.QueryRow(`SELECT name FROM chats WHERE jid='2@lid'`).Scan(&name)
+	if name != "Real Name" {
+		t.Errorf("name = %q", name)
+	}
+}
+
+func TestMergeThrottle(t *testing.T) {
+	m := &mergeThrottle{every: time.Minute}
+	t0 := time.Now()
+	if !m.allow(t0) || m.allow(t0.Add(30*time.Second)) || !m.allow(t0.Add(61*time.Second)) {
+		t.Error("throttle")
+	}
+	pn := types.NewJID("1", types.DefaultUserServer)
+	lid := types.NewJID("2", types.HiddenUserServer)
+	if !seesBothAddresses(pn, lid) || !seesBothAddresses(lid, pn) || seesBothAddresses(pn, types.EmptyJID) || seesBothAddresses(lid, lid) {
+		t.Error("seesBothAddresses")
+	}
+}
+
+func TestPlumbingIsNotAUserVisibleMessage(t *testing.T) {
+	for name, m := range map[string]*waProto.Message{
+		"poll vote":    {PollUpdateMessage: &waProto.PollUpdateMessage{}},
+		"enc reaction": {EncReactionMessage: &waProto.EncReactionMessage{}},
+		"keep in chat": {KeepInChatMessage: &waProto.KeepInChatMessage{}},
+		"pin":          {PinInChatMessage: &waProto.PinInChatMessage{}},
+		"call":         {Call: &waProto.Call{}},
+	} {
+		if hasUserVisiblePayload(m) {
+			t.Errorf("%s should not be stored as unsupported", name)
+		}
 	}
 }

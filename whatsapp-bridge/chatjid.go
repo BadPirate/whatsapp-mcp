@@ -88,10 +88,15 @@ func (store *MessageStore) mergeChatInto(fromJID, toJID, name string, last any) 
 		return err
 	}
 	defer tx.Rollback()
+	// The chat name: the LID chat's own, unless it is empty or only digits (a
+	// name never learned) and the phone-number chat has a real one.
 	if _, err := tx.Exec(
 		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
 		 ON CONFLICT(jid) DO UPDATE SET
-		   name = CASE WHEN COALESCE(chats.name, '') = '' THEN excluded.name ELSE chats.name END,
+		   name = CASE WHEN COALESCE(excluded.name, '') <> ''
+		     AND (COALESCE(chats.name, '') = '' OR chats.name NOT GLOB '*[^0-9]*')
+		     AND excluded.name GLOB '*[^0-9]*'
+		     THEN excluded.name ELSE chats.name END,
 		   last_message_time = CASE WHEN chats.last_message_time IS NULL
 		     OR datetime(excluded.last_message_time) > datetime(chats.last_message_time)
 		     THEN excluded.last_message_time ELSE chats.last_message_time END`,
@@ -99,10 +104,23 @@ func (store *MessageStore) mergeChatInto(fromJID, toJID, name string, last any) 
 	); err != nil {
 		return err
 	}
+	// A placeholder under the LID chat gives way to the real message the
+	// phone-number chat holds under the same ID.
+	if _, err := tx.Exec(
+		`UPDATE messages SET
+		   sender = p.sender, content = p.content, timestamp = p.timestamp, is_from_me = p.is_from_me,
+		   media_type = p.media_type, filename = p.filename, url = p.url, media_key = p.media_key,
+		   file_sha256 = p.file_sha256, file_enc_sha256 = p.file_enc_sha256, file_length = p.file_length,
+		   quoted_message_id = p.quoted_message_id, placeholder = 0
+		 FROM messages AS p
+		 WHERE messages.chat_jid = ? AND p.chat_jid = ? AND messages.id = p.id
+		   AND messages.placeholder = 1 AND p.placeholder = 0`, toJID, fromJID,
+	); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE OR IGNORE messages SET chat_jid = ? WHERE chat_jid = ?`, toJID, fromJID); err != nil {
 		return err
 	}
-	// Whatever is left was already stored under the LID chat.
 	if _, err := tx.Exec(`DELETE FROM messages WHERE chat_jid = ?`, fromJID); err != nil {
 		return err
 	}

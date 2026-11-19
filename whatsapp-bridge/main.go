@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -204,6 +205,15 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to migrate messages table: %v", err)
 	}
 
+	// A row the bridge wrote in place of a message it could not read
+	// ("could not be decrypted yet", "unsupported") is flagged, not recognised by
+	// its text, so a later real message replaces it and a merge never prefers it.
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN placeholder INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate messages table (placeholder): %v", err)
+	}
+
 	// #280: FTS5-backed content search. go-sqlite3 omits FTS5 by default; if
 	// the binary was NOT built with `-tags sqlite_fts5`, the CREATE VIRTUAL
 	// TABLE will fail with "no such module: fts5". We log a helpful message
@@ -286,6 +296,19 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64, quotedMessageID string) error {
+	return store.storeMessage(id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url,
+		mediaKey, fileSHA256, fileEncSHA256, fileLength, quotedMessageID, false)
+}
+
+// StorePlaceholder stores a stand-in for a message the bridge could not read.
+// It is flagged (placeholder = 1); a real message stored later under the same
+// ID and chat replaces it and clears the flag.
+func (store *MessageStore) StorePlaceholder(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool) error {
+	return store.storeMessage(id, chatJID, sender, content, timestamp, isFromMe, "", "", "", nil, nil, nil, 0, "", true)
+}
+
+func (store *MessageStore) storeMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
+	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64, quotedMessageID string, placeholder bool) error {
 	// Only store if there's actual content or media
 	if content == "" && mediaType == "" {
 		return nil
@@ -293,9 +316,9 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 
 	_, err := store.db.Exec(
 		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, nullIfEmpty(quotedMessageID),
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length, quoted_message_id, placeholder)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, nullIfEmpty(quotedMessageID), placeholder,
 	)
 	return err
 }
@@ -969,6 +992,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 	// Extract media info
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+	placeholder := false
 
 	// Skip if there's no content and no media.
 	//
@@ -996,10 +1020,11 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			return
 		}
 		content = "[unsupported message]"
+		placeholder = true
 	}
 
 	// Store message in database
-	err = messageStore.StoreMessage(
+	err = messageStore.storeMessage(
 		msg.Info.ID,
 		chatJID,
 		sender,
@@ -1014,7 +1039,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileEncSHA256,
 		fileLength,
 		extractQuotedMessageID(msg.Message),
+		placeholder,
 	)
+
+	noteAddressPair(client, messageStore, msg.Info.Chat, alt, logger)
 
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
@@ -1965,7 +1993,11 @@ func hasUserVisiblePayload(msg *waProto.Message) bool {
 		switch string(fd.Name()) {
 		case "senderKeyDistributionMessage", "messageContextInfo", "protocolMessage",
 			"fastRatchetKeySenderKeyDistributionMessage", "secretEncryptedMessage",
-			"peerDataOperationRequestMessage", "peerDataOperationRequestResponseMessage":
+			"peerDataOperationRequestMessage", "peerDataOperationRequestResponseMessage",
+			"pollUpdateMessage", "encReactionMessage", "encEventResponseMessage", "keepInChatMessage",
+			"pinInChatMessage", "call", "callLogMesssage", "bcallMessage", "requestPhoneNumberMessage",
+			"appStateSyncKeyShare", "appStateSyncKeyRequest", "appStateFatalExceptionNotification",
+			"historySyncNotification", "initialSecurityNotificationSettingSync":
 			return true
 		}
 		found = true
@@ -2000,8 +2032,8 @@ func storeUndecryptable(client *whatsmeow.Client, messageStore *MessageStore, ev
 	if err := messageStore.db.QueryRow(`SELECT 1 FROM messages WHERE id = ? AND chat_jid = ?`, evt.Info.ID, chatJID).Scan(&exists); err == nil {
 		return
 	}
-	if err := messageStore.StoreMessage(evt.Info.ID, chatJID, sender, content, evt.Info.Timestamp, evt.Info.IsFromMe,
-		"", "", "", nil, nil, nil, 0, ""); err != nil {
+	noteAddressPair(client, messageStore, evt.Info.Chat, alt, logger)
+	if err := messageStore.StorePlaceholder(evt.Info.ID, chatJID, sender, content, evt.Info.Timestamp, evt.Info.IsFromMe); err != nil {
 		logger.Warnf("Failed to store placeholder for %s: %v", evt.Info.ID, err)
 	}
 }
@@ -2014,5 +2046,39 @@ func mergeKnownPNChats(client *whatsmeow.Client, messageStore *MessageStore, log
 		logger.Warnf("Failed to merge phone-number chats into LID chats: %v", err)
 	} else if n > 0 {
 		logger.Infof("Merged %d phone-number chats into their LID chats", n)
+	}
+}
+
+// addressPairMerge throttles the merge of phone-number chats that runs when a
+// message shows both addresses of a contact (a LID mapping learned mid-session).
+var addressPairMerge = &mergeThrottle{every: time.Minute}
+
+type mergeThrottle struct {
+	mu    sync.Mutex
+	every time.Duration
+	last  time.Time
+}
+
+// allow reports whether a merge may run at now, and counts it if so.
+func (m *mergeThrottle) allow(now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.last.IsZero() && now.Sub(m.last) < m.every {
+		return false
+	}
+	m.last = now
+	return true
+}
+
+// seesBothAddresses is true when a message named a contact by a phone number
+// and a LID, i.e. the mapping between them is known now.
+func seesBothAddresses(chat, alt types.JID) bool {
+	return (chat.Server == types.DefaultUserServer && alt.Server == types.HiddenUserServer) ||
+		(chat.Server == types.HiddenUserServer && alt.Server == types.DefaultUserServer)
+}
+
+func noteAddressPair(client *whatsmeow.Client, messageStore *MessageStore, chat, alt types.JID, logger waLog.Logger) {
+	if seesBothAddresses(chat, alt) && addressPairMerge.allow(time.Now()) {
+		mergeKnownPNChats(client, messageStore, logger)
 	}
 }
