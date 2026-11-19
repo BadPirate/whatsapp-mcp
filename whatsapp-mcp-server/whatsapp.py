@@ -278,6 +278,37 @@ def _fts_ready(cursor) -> bool:
     return True
 
 
+HISTORY_CAVEAT = (
+    "Note: this history may be incomplete. Messages the owner sent from their phone or another "
+    "device, or sent while the bridge was offline, can be missing. Do not state that a message "
+    "was never sent or that nothing was said; say it is not in the stored history."
+)
+
+
+def history_note(cursor, chat_jids) -> str:
+    """A note for list_messages' answer: what each chat's stored history covers, and that it may have gaps.
+
+    The first stored message being one from the other side is a sign the owner's own opening
+    message is missing, so that is said too.
+    """
+    lines = [HISTORY_CAVEAT]
+    for jid in chat_jids:
+        cursor.execute(
+            "SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM messages WHERE chat_jid = ?", (jid,))
+        first, last, count = cursor.fetchone()
+        if not count:
+            continue
+        cursor.execute(
+            "SELECT is_from_me FROM messages WHERE chat_jid = ? ORDER BY timestamp ASC LIMIT 1", (jid,))
+        first_from_me = cursor.fetchone()[0]
+        line = f"Stored history of {jid}: {count} messages from {first} to {last}."
+        if not first_from_me and not jid.endswith("@g.us"):
+            line += " Its earliest stored message is from the other side, so what was said before it may be missing."
+        lines.append(line)
+    return "\n".join(lines)
+
+
+
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -379,10 +410,14 @@ def list_messages(
                 messages_with_context.append(context.message)
                 messages_with_context.extend(context.after)
             
-            return format_messages_list(messages_with_context, show_chat_info=True)
-            
-        # Format and display messages without context
-        return format_messages_list(result, show_chat_info=True)    
+            output = format_messages_list(messages_with_context, show_chat_info=True)
+            shown = messages_with_context
+        else:
+            # Format and display messages without context
+            output = format_messages_list(result, show_chat_info=True)
+            shown = result
+        chat_jids = [chat_jid] if chat_jid else list(dict.fromkeys(m.chat_jid for m in shown))
+        return output + "\n\n" + history_note(cursor, chat_jids[:5])
         
     except sqlite3.Error as e:
         print(f"Database error: {e}", file=sys.stderr)

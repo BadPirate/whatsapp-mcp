@@ -274,7 +274,10 @@ func (store *MessageStore) Close() error {
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
 		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
-		 ON CONFLICT(jid) DO UPDATE SET name = excluded.name, last_message_time = excluded.last_message_time`,
+		 ON CONFLICT(jid) DO UPDATE SET name = excluded.name,
+		   last_message_time = CASE WHEN chats.last_message_time IS NULL
+		     OR datetime(excluded.last_message_time) > datetime(chats.last_message_time)
+		     THEN excluded.last_message_time ELSE chats.last_message_time END`,
 		jid, name, lastMessageTime,
 	)
 	return err
@@ -366,6 +369,17 @@ func unwrapMessage(msg *waProto.Message) *waProto.Message {
 			msg = msg.GetViewOnceMessageV2Extension().GetMessage()
 		case msg.GetDocumentWithCaptionMessage().GetMessage() != nil:
 			msg = msg.GetDocumentWithCaptionMessage().GetMessage()
+		// What the owner sends from their own phone (or another linked device)
+		// reaches this device wrapped in a DeviceSentMessage. whatsmeow unwraps
+		// it for live events, but history sync payloads are not unwrapped, so
+		// without this a from-me text in a synced chat is stored empty and
+		// dropped while its media (read by extractMediaInfo's own unwrap) lives.
+		case msg.GetDeviceSentMessage().GetMessage() != nil:
+			msg = msg.GetDeviceSentMessage().GetMessage()
+		case msg.GetGroupMentionedMessage().GetMessage() != nil:
+			msg = msg.GetGroupMentionedMessage().GetMessage()
+		case msg.GetLottieStickerMessage().GetMessage() != nil:
+			msg = msg.GetLottieStickerMessage().GetMessage()
 		default:
 			return msg
 		}
@@ -405,6 +419,47 @@ func extractTextContent(msg *waProto.Message) string {
 	}
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		return doc.GetCaption()
+	}
+
+	// Replies to buttons and lists, and the bodies of button, list and
+	// interactive messages, are text a person wrote or chose.
+	if r := msg.GetButtonsResponseMessage(); r != nil {
+		if t := r.GetSelectedDisplayText(); t != "" {
+			return t
+		}
+	}
+	if r := msg.GetListResponseMessage(); r != nil {
+		if t := r.GetTitle(); t != "" {
+			return t
+		}
+	}
+	if r := msg.GetTemplateButtonReplyMessage(); r != nil {
+		if t := r.GetSelectedDisplayText(); t != "" {
+			return t
+		}
+	}
+	if b := msg.GetButtonsMessage(); b != nil {
+		if t := b.GetContentText(); t != "" {
+			return t
+		}
+	}
+	if l := msg.GetListMessage(); l != nil {
+		if t := l.GetDescription(); t != "" {
+			return t
+		}
+		if t := l.GetTitle(); t != "" {
+			return t
+		}
+	}
+	if i := msg.GetInteractiveMessage(); i != nil {
+		if t := i.GetBody().GetText(); t != "" {
+			return t
+		}
+	}
+	if e := msg.GetEventMessage(); e != nil {
+		if n := e.GetName(); n != "" {
+			return fmt.Sprintf("[event: %s]", n)
+		}
 	}
 
 	// Non-text messages used to return "" here, which made StoreMessage drop
@@ -870,11 +925,19 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 // Handle regular incoming messages with media support
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Save message to database
-	chatJID := msg.Info.Chat.String()
+	// A direct chat is stored under one JID whichever address this message used
+	// (see canonicalChatJID), so the owner's own messages and the other side's
+	// replies are the same chat.
+	alt := msg.Info.RecipientAlt
+	if !msg.Info.IsFromMe {
+		alt = msg.Info.SenderAlt
+	}
+	chatJIDValue := canonicalChatJID(context.Background(), client.Store.LIDs, msg.Info.Chat, alt)
+	chatJID := chatJIDValue.String()
 	sender := msg.Info.Sender.User
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+	name := GetChatName(client, messageStore, chatJIDValue, chatJID, nil, sender, logger)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
@@ -922,11 +985,17 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 				return true
 			})
 			if len(fields) > 0 {
-				logger.Warnf("Dropping message %s in %s: no text or media extracted. Populated fields: %s",
+				logger.Warnf("No text or media extracted from message %s in %s. Populated fields: %s",
 					msg.Info.ID, chatJID, strings.Join(fields, ", "))
 			}
 		}
-		return
+		// A person's message of a shape not understood yet is kept as a
+		// placeholder, so it is never missing without a trace; protocol
+		// plumbing (key distribution, app state, history notices) is not.
+		if !hasUserVisiblePayload(msg.Message) {
+			return
+		}
+		content = "[unsupported message]"
 	}
 
 	// Store message in database
@@ -1374,8 +1443,12 @@ func main() {
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
 
+		case *events.UndecryptableMessage:
+			storeUndecryptable(client, messageStore, v, logger)
+
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			go mergeKnownPNChats(client, messageStore, logger)
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")
@@ -1553,6 +1626,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
 			continue
 		}
+		// Same chat as the live events use, whichever address the sync named.
+		jid = canonicalChatJID(context.Background(), client.Store.LIDs, jid, types.EmptyJID)
+		chatJID = jid.String()
 
 		// Get appropriate chat name by passing the history sync conversation directly
 		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
@@ -1560,21 +1636,19 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		// Process messages
 		messages := conversation.Messages
 		if len(messages) > 0 {
-			// Update chat with latest message timestamp
-			latestMsg := messages[0]
-			if latestMsg == nil || latestMsg.Message == nil {
+			// Update chat with the latest message timestamp. The first message
+			// is not always usable (or the newest), and skipping the whole
+			// conversation for it lost every message in it.
+			var latest uint64
+			for _, m := range messages {
+				if m != nil && m.Message != nil && m.Message.GetMessageTimestamp() > latest {
+					latest = m.Message.GetMessageTimestamp()
+				}
+			}
+			if latest == 0 {
 				continue
 			}
-
-			// Get timestamp from message info
-			timestamp := time.Time{}
-			if ts := latestMsg.Message.GetMessageTimestamp(); ts != 0 {
-				timestamp = time.Unix(int64(ts), 0)
-			} else {
-				continue
-			}
-
-			messageStore.StoreChat(chatJID, name, timestamp)
+			messageStore.StoreChat(chatJID, name, time.Unix(int64(latest), 0))
 
 			// Store messages
 			for _, msg := range messages {
@@ -1671,6 +1745,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	mergeKnownPNChats(client, messageStore, logger)
 }
 
 // Request history sync from the server
@@ -1876,4 +1951,68 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// hasUserVisiblePayload reports whether a message carries anything but
+// protocol plumbing, so that handleMessage keeps a placeholder for a message
+// of a shape it does not understand instead of dropping it.
+func hasUserVisiblePayload(msg *waProto.Message) bool {
+	if msg == nil {
+		return false
+	}
+	found := false
+	msg.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		switch string(fd.Name()) {
+		case "senderKeyDistributionMessage", "messageContextInfo", "protocolMessage",
+			"fastRatchetKeySenderKeyDistributionMessage", "secretEncryptedMessage",
+			"peerDataOperationRequestMessage", "peerDataOperationRequestResponseMessage":
+			return true
+		}
+		found = true
+		return false
+	})
+	return found
+}
+
+// storeUndecryptable keeps a visible placeholder for a message this device
+// could not decrypt (typically the owner's own message sent from the phone, or
+// one whose keys were not shared yet). Before this they vanished without a
+// trace. When whatsmeow's retry succeeds the real message arrives under the
+// same ID and chat and replaces the placeholder (INSERT OR REPLACE).
+func storeUndecryptable(client *whatsmeow.Client, messageStore *MessageStore, evt *events.UndecryptableMessage, logger waLog.Logger) {
+	alt := evt.Info.RecipientAlt
+	if !evt.Info.IsFromMe {
+		alt = evt.Info.SenderAlt
+	}
+	chatJIDValue := canonicalChatJID(context.Background(), client.Store.LIDs, evt.Info.Chat, alt)
+	chatJID := chatJIDValue.String()
+	sender := evt.Info.Sender.User
+	name := GetChatName(client, messageStore, chatJIDValue, chatJID, nil, sender, logger)
+	if err := messageStore.StoreChat(chatJID, name, evt.Info.Timestamp); err != nil {
+		logger.Warnf("Failed to store chat: %v", err)
+	}
+	content := "[message could not be decrypted yet]"
+	if evt.IsUnavailable {
+		content = "[message not available yet]"
+	}
+	// Never replace a message that was already stored for real.
+	var exists int
+	if err := messageStore.db.QueryRow(`SELECT 1 FROM messages WHERE id = ? AND chat_jid = ?`, evt.Info.ID, chatJID).Scan(&exists); err == nil {
+		return
+	}
+	if err := messageStore.StoreMessage(evt.Info.ID, chatJID, sender, content, evt.Info.Timestamp, evt.Info.IsFromMe,
+		"", "", "", nil, nil, nil, 0, ""); err != nil {
+		logger.Warnf("Failed to store placeholder for %s: %v", evt.Info.ID, err)
+	}
+}
+
+// mergeKnownPNChats folds chats stored under a phone-number JID into the LID
+// chat of the same contact, once the LID mapping is known.
+func mergeKnownPNChats(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) {
+	n, err := messageStore.mergePNChats(context.Background(), client.Store.LIDs)
+	if err != nil {
+		logger.Warnf("Failed to merge phone-number chats into LID chats: %v", err)
+	} else if n > 0 {
+		logger.Infof("Merged %d phone-number chats into their LID chats", n)
+	}
 }

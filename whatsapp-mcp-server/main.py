@@ -121,8 +121,11 @@ def list_messages(
 ) -> str:
     """Get WhatsApp messages matching specified criteria with optional context.
 
-    Returns formatted text, one message per line, with each message's ID.
-    
+    Returns formatted text, one message per line, with each message's ID, then a note on how
+    complete the stored history is. The history may be incomplete: messages the owner sent from
+    their phone or another device, or while the bridge was offline, can be missing, so never
+    tell the owner "you never sent X" from an absence here; say it is not in the stored history.
+
     Args:
         after: Optional ISO-8601 formatted string to only return messages after this date
         before: Optional ISO-8601 formatted string to only return messages before this date
