@@ -1,5 +1,11 @@
+import base64
+import binascii
+import contextlib
+import mimetypes
+import shutil
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -33,6 +39,67 @@ def _inside_media_dir(path: str) -> bool:
     root = os.path.realpath(MEDIA_DIR)
     real = os.path.realpath(path)
     return os.path.commonpath([root, real]) == root
+
+# Largest file accepted as base64 content (decoded bytes). The bridge reads the whole
+# file into memory and WhatsApp itself caps documents at about 100 MB.
+MAX_MEDIA_BYTES = int(os.environ.get("WHATSAPP_MAX_MEDIA_BYTES", str(64 * 1024 * 1024)))
+
+
+class MediaInputError(ValueError):
+    """The media arguments are unusable; the message is shown to the caller."""
+
+
+def _media_filename(filename: str, mime_type: str) -> str:
+    """A plain, safe file name; the extension decides how the bridge sends it."""
+    name = os.path.basename((filename or "").replace("\\", "/")).strip()
+    name = "".join(c for c in name if c.isprintable() and c not in '<>:"|?*\x00')
+    if name in ("", ".", ".."):
+        name = ""
+    ext = os.path.splitext(name)[1]
+    if not ext and mime_type:
+        guessed = mimetypes.guess_extension(mime_type.split(";")[0].strip().lower()) or ""
+        name = (name or "file") + guessed
+        ext = guessed
+    if not name or not ext:
+        raise MediaInputError("filename with an extension (or a known mime_type) is required with media_base64")
+    return name[-120:]
+
+
+@contextlib.contextmanager
+def _media_source(media_path: str, media_base64: str, filename: str, mime_type: str):
+    """Yield the path of the file to send: media_path as given, or media_base64 written to a
+    private folder inside MEDIA_DIR that is removed afterwards. Exactly one of the two."""
+    if bool(media_path) == bool(media_base64):
+        raise MediaInputError("Give exactly one of media_path and media_base64")
+    if media_path:
+        yield media_path
+        return
+    if not MEDIA_DIR or not os.path.isdir(MEDIA_DIR):
+        raise MediaInputError("media sending is disabled: WHATSAPP_MEDIA_DIR is not set or missing")
+    name = _media_filename(filename, mime_type)
+    text = media_base64.strip()
+    if text.startswith("data:"):
+        text = text.partition(",")[2]
+    if len(text) * 3 // 4 > MAX_MEDIA_BYTES + 3:
+        raise MediaInputError(f"media_base64 is larger than the {MAX_MEDIA_BYTES // (1024 * 1024)} MiB limit")
+    try:
+        data = base64.b64decode("".join(text.split()), validate=True)
+    except (binascii.Error, ValueError):
+        raise MediaInputError("media_base64 is not valid base64")
+    if not data:
+        raise MediaInputError("media_base64 is empty")
+    if len(data) > MAX_MEDIA_BYTES:
+        raise MediaInputError(f"media_base64 is larger than the {MAX_MEDIA_BYTES // (1024 * 1024)} MiB limit")
+    folder = tempfile.mkdtemp(prefix=".pcp-", dir=MEDIA_DIR)  # mode 0700, random name
+    try:
+        path = os.path.join(folder, name)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        yield path
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
 
 # (connect, read) timeout for calls to the bridge. The read timeout is generous
 # because the bridge uploads media to WhatsApp before it responds.
@@ -918,19 +985,24 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
-def send_message(
+def send_message(*args, **kwargs) -> Tuple[bool, str]:
+    ok, message, _ = send_message_full(*args, **kwargs)
+    return ok, message
+
+
+def send_message_full(
     recipient: str,
     message: str,
     reply_to_message_id: Optional[str] = None,
     reply_to_sender_jid: Optional[str] = None,
     mentions: Optional[List[str]] = None,
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, str]:
+    """Send a text message; returns (success, message, sent message id or "")."""
     try:
         # Validate input
         if not recipient:
-            return False, "Recipient must be provided"
+            return False, "Recipient must be provided", ""
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
         payload = {
             "recipient": recipient,
             "message": message,
@@ -945,111 +1017,93 @@ def send_message(
         if mentions:
             payload["mentions"] = list(mentions)
 
-        response = _post(url, payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
-    except requests.Timeout:
-        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying."
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        return _send_to_bridge(payload)
 
-def send_file(recipient: str, media_path: str, caption: str = "") -> Tuple[bool, str]:
+    except requests.Timeout:
+        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying.", ""
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", ""
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", ""
+
+def send_file(recipient: str, media_path: str = "", caption: str = "", media_base64: str = "",
+              filename: str = "", mime_type: str = "") -> Tuple[bool, str]:
+    ok, message, _ = send_file_full(recipient, media_path, caption, media_base64, filename, mime_type)
+    return ok, message
+
+
+def send_file_full(recipient: str, media_path: str = "", caption: str = "", media_base64: str = "",
+                   filename: str = "", mime_type: str = "") -> Tuple[bool, str, str]:
+    """Send a file; returns (success, message, sent message id or "")."""
     try:
-        # Validate input
         if not recipient:
-            return False, "Recipient must be provided"
-        
-        if not media_path:
-            return False, "Media path must be provided"
-        
-        if not _inside_media_dir(media_path):
-            return False, "Media path must be an absolute path inside WHATSAPP_MEDIA_DIR"
-
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-        
-        url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
-            "recipient": recipient,
-            "media_path": media_path,
-            # The bridge uses "message" as the caption for images, videos and documents.
-            "message": caption
-        }
-        
-        response = _post(url, payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+            return False, "Recipient must be provided", ""
+        with _media_source(media_path, media_base64, filename, mime_type) as path:
+            if not _inside_media_dir(path):
+                return False, "Media path must be an absolute path inside WHATSAPP_MEDIA_DIR", ""
+            if not os.path.isfile(path):
+                return False, f"Media file not found: {path}", ""
+            payload = {
+                "recipient": recipient,
+                "media_path": path,
+                # The bridge uses "message" as the caption for images, videos and documents.
+                "message": caption,
+            }
+            return _send_to_bridge(payload)
+    except MediaInputError as e:
+        return False, str(e), ""
     except requests.Timeout:
-        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying."
+        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying.", ""
     except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
+        return False, f"Request error: {str(e)}", ""
     except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        return False, f"Unexpected error: {str(e)}", ""
 
-def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
+
+def _send_to_bridge(payload: dict) -> Tuple[bool, str, str]:
+    response = _post(f"{WHATSAPP_API_BASE_URL}/send", payload)
+    try:
+        result = response.json()
+    except ValueError:
+        return False, f"Error: HTTP {response.status_code} - {response.text}", ""
+    if response.status_code == 200:
+        return result.get("success", False), result.get("message", "Unknown response"), result.get("message_id", "") or ""
+    return False, f"Error: HTTP {response.status_code} - {response.text}", ""
+
+
+def send_audio_message(recipient: str, media_path: str = "", media_base64: str = "",
+                       filename: str = "", mime_type: str = "") -> Tuple[bool, str]:
+    ok, message, _ = send_audio_message_full(recipient, media_path, media_base64, filename, mime_type)
+    return ok, message
+
+
+def send_audio_message_full(recipient: str, media_path: str = "", media_base64: str = "",
+                            filename: str = "", mime_type: str = "") -> Tuple[bool, str, str]:
+    """Send audio as a voice message; returns (success, message, sent message id or "")."""
     converted_path = None
     try:
-        # Validate input
         if not recipient:
-            return False, "Recipient must be provided"
-        
-        if not media_path:
-            return False, "Media path must be provided"
-        
-        if not _inside_media_dir(media_path):
-            return False, "Media path must be an absolute path inside WHATSAPP_MEDIA_DIR"
-
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-
-        if not media_path.endswith(".ogg"):
-            try:
-                converted_path = audio.convert_to_opus_ogg_temp(media_path, directory=MEDIA_DIR)
-                media_path = converted_path
-            except Exception as e:
-                return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
-        
-        url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
-            "recipient": recipient,
-            "media_path": media_path
-        }
-        
-        response = _post(url, payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+            return False, "Recipient must be provided", ""
+        with _media_source(media_path, media_base64, filename, mime_type) as path:
+            if not _inside_media_dir(path):
+                return False, "Media path must be an absolute path inside WHATSAPP_MEDIA_DIR", ""
+            if not os.path.isfile(path):
+                return False, f"Media file not found: {path}", ""
+            if not path.endswith(".ogg"):
+                try:
+                    converted_path = audio.convert_to_opus_ogg_temp(path, directory=MEDIA_DIR)
+                    path = converted_path
+                except Exception as e:
+                    return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}", ""
+            return _send_to_bridge({"recipient": recipient, "media_path": path})
+    except MediaInputError as e:
+        return False, str(e), ""
     except requests.Timeout:
-        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying."
+        return False, "Timed out waiting for the WhatsApp bridge. The message may still have been sent, so check the chat before retrying.", ""
     except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
-    except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
+        return False, f"Request error: {str(e)}", ""
     except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        return False, f"Unexpected error: {str(e)}", ""
     finally:
         if converted_path is not None:
             try:
