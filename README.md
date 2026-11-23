@@ -191,7 +191,7 @@ The bridge's REST API is locked down. It refuses to start unless the bridge and 
 
 - `WHATSAPP_BRIDGE_TOKEN`: a random secret of at least 32 characters. Set the same value for the bridge and for the MCP server. Every request must carry it in an `X-Bridge-Token` header. Generate one with `head -c 32 /dev/urandom | base64`.
 - `WHATSAPP_MEDIA_DIR`: the only directory `send_file` and `send_audio_message` may read from. Sending files is refused when it is unset.
-- `send_file` and `send_audio_message` also take the file as `media_base64` with a `filename` (and an optional `mime_type`) instead of `media_path`, exactly one of the two. The bytes are written to a private folder inside `WHATSAPP_MEDIA_DIR`, sent, and removed. `WHATSAPP_MAX_MEDIA_BYTES` (default 64 MiB, decoded) bounds the size. The send tools answer with `message_id` when the bridge reports one.
+- `send_file` and `send_audio_message` also take the file as `media_base64` with a `filename` (and an optional `mime_type`) instead of `media_path`, exactly one of the two. The bytes are written to a private folder inside `WHATSAPP_MEDIA_DIR`, sent, and removed. `WHATSAPP_MAX_MEDIA_BYTES` (default 64 MiB, decoded) bounds the size. Over streamable HTTP (`http_main.py`), the request body limit follows it (the base64 of that size plus 1 MiB, where the MCP SDK's own default of 4 MiB answers a phone photo with HTTP 413); `MCP_MAX_REQUEST_BYTES` overrides it. The send tools answer with `message_id` when the bridge reports one.
 - The API listens on `127.0.0.1` only, and only accepts `Content-Type: application/json`.
 - Downloaded media filenames and chat IDs are sanitised, so a sender cannot write outside `store/`.
 - Message text is stripped of control characters before it is printed to the terminal.
