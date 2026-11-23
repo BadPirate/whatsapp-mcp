@@ -43,6 +43,17 @@ var bridgeToken = os.Getenv("WHATSAPP_BRIDGE_TOKEN")
 // mediaDir is the only directory media may be sent from. Empty disables sending media.
 var mediaDir = os.Getenv("WHATSAPP_MEDIA_DIR")
 
+// logContent controls whether message text, captions and file names are written
+// to the logs. Off by default so chat content does not pile up in plain text;
+// set WHATSAPP_LOG_CONTENT=1 (or true/yes/on) to turn it on for debugging.
+var logContent = func() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WHATSAPP_LOG_CONTENT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}()
+
 // cleanForLog strips control characters so message text cannot inject terminal escape codes.
 func cleanForLog(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -605,6 +616,8 @@ func extractTextContent(msg *waProto.Message) string {
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	// MessageID is the id WhatsApp gave the sent message, so a caller can refer to it later.
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // SendMessageRequest represents the request body for the send message API.
@@ -688,9 +701,9 @@ func attachContextInfo(msg *waProto.Message, text string, ctxInfo *waProto.Conte
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, replyToMessageID string, replyToSenderJID string, mentions []string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, replyToMessageID string, replyToSenderJID string, mentions []string) (bool, string, string) {
 	if !client.IsConnected() {
-		return false, "Not connected to WhatsApp"
+		return false, "Not connected to WhatsApp", ""
 	}
 
 	// Create JID for recipient
@@ -704,7 +717,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Parse the JID string
 		recipientJID, err = types.ParseJID(recipient)
 		if err != nil {
-			return false, fmt.Sprintf("Error parsing JID: %v", err)
+			return false, fmt.Sprintf("Error parsing JID: %v", err), ""
 		}
 	} else {
 		// Create JID from phone number
@@ -720,14 +733,14 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	if mediaPath != "" {
 		safePath, err := allowedMediaPath(mediaPath)
 		if err != nil {
-			return false, fmt.Sprintf("Media path rejected: %v", err)
+			return false, fmt.Sprintf("Media path rejected: %v", err), ""
 		}
 		mediaPath = safePath
 
 		// Read media file
 		mediaData, err := os.ReadFile(mediaPath)
 		if err != nil {
-			return false, fmt.Sprintf("Error reading media file: %v", err)
+			return false, fmt.Sprintf("Error reading media file: %v", err), ""
 		}
 
 		// Determine media type and mime type based on file extension
@@ -780,7 +793,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
 		if err != nil {
-			return false, fmt.Sprintf("Error uploading media: %v", err)
+			return false, fmt.Sprintf("Error uploading media: %v", err), ""
 		}
 
 		fmt.Println("Media uploaded", resp)
@@ -810,7 +823,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 					seconds = analyzedSeconds
 					waveform = analyzedWaveform
 				} else {
-					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err)
+					return false, fmt.Sprintf("Failed to analyze Ogg Opus file: %v", err), ""
 				}
 			} else {
 				fmt.Printf("Not an Ogg Opus file: %s\n", mimeType)
@@ -860,13 +873,13 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	attachContextInfo(msg, message, buildContextInfo(replyToMessageID, replyToSenderJID, mentions))
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	sent, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
-		return false, fmt.Sprintf("Error sending message: %v", err)
+		return false, fmt.Sprintf("Error sending message: %v", err), ""
 	}
 
-	return true, fmt.Sprintf("Message sent to %s", recipient)
+	return true, fmt.Sprintf("Message sent to %s", recipient), sent.ID
 }
 
 // Extract media info from a message
@@ -1056,9 +1069,17 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 
 		// Log based on message type
 		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, cleanForLog(sender), mediaType, cleanForLog(filename), cleanForLog(content))
+			if logContent {
+				fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, cleanForLog(sender), mediaType, cleanForLog(filename), cleanForLog(content))
+			} else {
+				fmt.Printf("[%s] %s message stored [%s]\n", timestamp, direction, mediaType)
+			}
 		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, cleanForLog(sender), cleanForLog(content))
+			if logContent {
+				fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, cleanForLog(sender), cleanForLog(content))
+			} else {
+				fmt.Printf("[%s] %s message stored\n", timestamp, direction)
+			}
 		}
 	}
 }
@@ -1318,10 +1339,14 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		fmt.Println("Received request to send message", cleanForLog(req.Message), cleanForLog(req.MediaPath))
+		if logContent {
+			fmt.Println("Received request to send message", cleanForLog(req.Message), cleanForLog(req.MediaPath))
+		} else {
+			fmt.Println("Received request to send message")
+		}
 
 		// Send the message (with optional reply-to context per #121)
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.ReplyToMessageID, req.ReplyToSenderJID, req.Mentions)
+		success, message, messageID := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.ReplyToMessageID, req.ReplyToSenderJID, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -1333,8 +1358,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		// Send response
 		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
+			Success:   success,
+			Message:   message,
+			MessageID: messageID,
 		})
 	})
 
@@ -1700,7 +1726,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", cleanForLog(content), mediaType)
+				if logContent {
+					logger.Infof("Message content: %v, Media Type: %v", cleanForLog(content), mediaType)
+				}
 
 				// Skip messages with no content and no media
 				if content == "" && mediaType == "" {
@@ -1759,8 +1787,10 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					logger.Warnf("Failed to store history message: %v", err)
 				} else {
 					syncedCount++
-					// Log successful message storage
-					if mediaType != "" {
+					// Log successful message storage (content only when WHATSAPP_LOG_CONTENT is on)
+					if !logContent {
+						// counted in syncedCount; summarised at the end of the sync
+					} else if mediaType != "" {
 						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
 							timestamp.Format("2006-01-02 15:04:05"), cleanForLog(sender), chatJID, mediaType, cleanForLog(filename), cleanForLog(content))
 					} else {

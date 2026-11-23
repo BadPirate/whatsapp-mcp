@@ -13,9 +13,9 @@ from whatsapp import (
     get_contact_chats as whatsapp_get_contact_chats,
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
-    send_message as whatsapp_send_message,
-    send_file as whatsapp_send_file,
-    send_audio_message as whatsapp_audio_voice_message,
+    send_message_full as whatsapp_send_message,
+    send_file_full as whatsapp_send_file,
+    send_audio_message_full as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
     react_to_message as whatsapp_react_to_message,
     list_contacts as whatsapp_list_contacts,
@@ -237,6 +237,13 @@ def get_message_context(
     context = whatsapp_get_message_context(message_id, before, after)
     return context
 
+def _sent(success: bool, message: str, message_id: str) -> Dict[str, Any]:
+    """The answer of a send tool; message_id is left out when the bridge gave none."""
+    answer: Dict[str, Any] = {"success": success, "message": message}
+    if message_id:
+        answer["message_id"] = message_id
+    return answer
+
 @send_tool()
 def send_message(
     recipient: str,
@@ -271,56 +278,73 @@ def send_message(
             "message": "Recipient must be provided"
         }
 
-    success, status_message = whatsapp_send_message(
+    success, status_message, message_id = whatsapp_send_message(
         recipient,
         message,
         reply_to_message_id=reply_to_message_id,
         reply_to_sender_jid=reply_to_sender_jid,
         mentions=mentions,
     )
-    return {
-        "success": success,
-        "message": status_message
-    }
+    return _sent(success, status_message, message_id)
 
 @send_tool()
-def send_file(recipient: str, media_path: str, caption: str = "") -> Dict[str, Any]:
+def send_file(
+    recipient: str,
+    media_path: Optional[str] = None,
+    caption: str = "",
+    media_base64: Optional[str] = None,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID. Optionally include a caption that appears attached to the media in WhatsApp.
-    
+
+    Give the file either as media_path (a path on the bridge's machine) or as media_base64
+    with filename; exactly one of the two.
+
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the media file to send (image, video, document)
+        media_path: The absolute path to the media file to send (image, video, document), inside the bridge's media folder. Not together with media_base64.
         caption: Optional text caption that appears attached to the media (default empty). Captions on documents may not be shown on all WhatsApp clients.
-    
+        media_base64: The file's content as standard base64 (at most 64 MiB decoded by default). Needs filename. Not together with media_path.
+        filename: With media_base64: the file's name with its extension (for example "photo.jpg"); the extension decides how it is sent and the name shows on documents.
+        mime_type: With media_base64: optional, the file's type (for example "image/jpeg"), used only to find an extension when filename has none.
+
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status, a status message and, when sent, message_id
     """
-    
-    # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path, caption)
-    return {
-        "success": success,
-        "message": status_message
-    }
+    success, status_message, message_id = whatsapp_send_file(
+        recipient, media_path or "", caption, media_base64 or "", filename or "", mime_type or ""
+    )
+    return _sent(success, status_message, message_id)
 
 @send_tool()
-def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
+def send_audio_message(
+    recipient: str,
+    media_path: Optional[str] = None,
+    media_base64: Optional[str] = None,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
-    
+
+    Give the audio either as media_path or as media_base64 with filename; exactly one of the two.
+
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
-    
+        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file). Not together with media_base64.
+        media_base64: The audio's content as standard base64 (at most 64 MiB decoded by default). Needs filename. Not together with media_path.
+        filename: With media_base64: the file's name with its extension (for example "voice.m4a").
+        mime_type: With media_base64: optional, the file's type, used only to find an extension when filename has none.
+
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status, a status message and, when sent, message_id
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
-    }
+    success, status_message, message_id = whatsapp_audio_voice_message(
+        recipient, media_path or "", media_base64 or "", filename or "", mime_type or ""
+    )
+    return _sent(success, status_message, message_id)
 
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
