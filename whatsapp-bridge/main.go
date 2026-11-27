@@ -964,16 +964,21 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// A direct chat is stored under one JID whichever address this message used
 	// (see canonicalChatJID), so the owner's own messages and the other side's
 	// replies are the same chat.
-	alt := msg.Info.RecipientAlt
-	if !msg.Info.IsFromMe {
-		alt = msg.Info.SenderAlt
-	}
-	chatJIDValue := canonicalChatJID(context.Background(), client.Store.LIDs, msg.Info.Chat, alt)
+	own, ownLID := ownJIDs(client)
+	chat, alt := chatForMessage(msg.Info, own, ownLID)
+	chatJIDValue := canonicalChatJID(context.Background(), client.Store.LIDs, chat, alt)
 	chatJID := chatJIDValue.String()
 	sender := msg.Info.Sender.User
 
-	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
-	name := GetChatName(client, messageStore, chatJIDValue, chatJID, nil, sender, logger)
+	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages).
+	// The sender is the chat's own name only for a message from the other side:
+	// for one the owner sent it is the owner's number, which named the contact
+	// by the owner's digits.
+	nameHint := sender
+	if msg.Info.IsFromMe {
+		nameHint = ""
+	}
+	name := GetChatName(client, messageStore, chatJIDValue, chatJID, nil, nameHint, logger)
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
@@ -1055,7 +1060,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		placeholder,
 	)
 
-	noteAddressPair(client, messageStore, msg.Info.Chat, alt, logger)
+	noteAddressPair(client, messageStore, chat, alt, logger)
 
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
@@ -1730,9 +1735,17 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					logger.Infof("Message content: %v, Media Type: %v", cleanForLog(content), mediaType)
 				}
 
-				// Skip messages with no content and no media
+				// Skip messages with no content and no media, unless a person
+				// wrote them in a shape not understood yet: those are kept as
+				// a flagged placeholder, as live messages are, so a from-me
+				// message is never missing without a trace.
+				placeholder := false
 				if content == "" && mediaType == "" {
-					continue
+					if !hasUserVisiblePayload(msg.Message.Message) {
+						continue
+					}
+					content = "[unsupported message]"
+					placeholder = true
 				}
 
 				// Determine sender
@@ -1767,7 +1780,14 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
-				err = messageStore.StoreMessage(
+				if placeholder {
+					// Never replace a message already stored for real.
+					var exists int
+					if messageStore.db.QueryRow(`SELECT 1 FROM messages WHERE id = ? AND chat_jid = ?`, msgID, chatJID).Scan(&exists) == nil {
+						continue
+					}
+				}
+				err = messageStore.storeMessage(
 					msgID,
 					chatJID,
 					sender,
@@ -1782,6 +1802,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					fileEncSHA256,
 					fileLength,
 					extractQuotedMessageID(msg.Message.Message),
+					placeholder,
 				)
 				if err != nil {
 					logger.Warnf("Failed to store history message: %v", err)
@@ -2042,14 +2063,16 @@ func hasUserVisiblePayload(msg *waProto.Message) bool {
 // trace. When whatsmeow's retry succeeds the real message arrives under the
 // same ID and chat and replaces the placeholder (INSERT OR REPLACE).
 func storeUndecryptable(client *whatsmeow.Client, messageStore *MessageStore, evt *events.UndecryptableMessage, logger waLog.Logger) {
-	alt := evt.Info.RecipientAlt
-	if !evt.Info.IsFromMe {
-		alt = evt.Info.SenderAlt
-	}
-	chatJIDValue := canonicalChatJID(context.Background(), client.Store.LIDs, evt.Info.Chat, alt)
+	own, ownLID := ownJIDs(client)
+	chat, alt := chatForMessage(evt.Info, own, ownLID)
+	chatJIDValue := canonicalChatJID(context.Background(), client.Store.LIDs, chat, alt)
 	chatJID := chatJIDValue.String()
 	sender := evt.Info.Sender.User
-	name := GetChatName(client, messageStore, chatJIDValue, chatJID, nil, sender, logger)
+	nameHint := sender
+	if evt.Info.IsFromMe {
+		nameHint = ""
+	}
+	name := GetChatName(client, messageStore, chatJIDValue, chatJID, nil, nameHint, logger)
 	if err := messageStore.StoreChat(chatJID, name, evt.Info.Timestamp); err != nil {
 		logger.Warnf("Failed to store chat: %v", err)
 	}
@@ -2062,7 +2085,7 @@ func storeUndecryptable(client *whatsmeow.Client, messageStore *MessageStore, ev
 	if err := messageStore.db.QueryRow(`SELECT 1 FROM messages WHERE id = ? AND chat_jid = ?`, evt.Info.ID, chatJID).Scan(&exists); err == nil {
 		return
 	}
-	noteAddressPair(client, messageStore, evt.Info.Chat, alt, logger)
+	noteAddressPair(client, messageStore, chat, alt, logger)
 	if err := messageStore.StorePlaceholder(evt.Info.ID, chatJID, sender, content, evt.Info.Timestamp, evt.Info.IsFromMe); err != nil {
 		logger.Warnf("Failed to store placeholder for %s: %v", evt.Info.ID, err)
 	}

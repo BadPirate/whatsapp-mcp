@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -128,4 +129,52 @@ func (store *MessageStore) mergeChatInto(fromJID, toJID, name string, last any) 
 		return err
 	}
 	return tx.Commit()
+}
+
+// isOwnJID reports whether jid is the owner's own account, by phone number or
+// LID, whatever the device.
+func isOwnJID(jid, own, ownLID types.JID) bool {
+	if jid.User == "" {
+		return false
+	}
+	return (own.User != "" && jid.User == own.User) || (ownLID.User != "" && jid.User == ownLID.User)
+}
+
+// chatForMessage returns the chat a message belongs to and the other address
+// of that chat's contact (empty when whatsmeow sent none).
+//
+// A message the owner sent from the primary phone reaches this device as a
+// DeviceSentMessage. whatsmeow takes its chat from the stanza's recipient
+// attribute and falls back to the sender's own address when there is none, so
+// such a message would be filed under the owner's own chat (the "note to
+// self" chat) instead of the contact's, and the contact's chat would show
+// only the contact's side. The destination the phone wrote into the message
+// (DeviceSentMeta.DestinationJID) is the contact; use it when the chat came
+// out as the owner's own. A genuine message to oneself carries no other
+// destination and stays in the own chat.
+func chatForMessage(info types.MessageInfo, own, ownLID types.JID) (chat, alt types.JID) {
+	chat = info.Chat
+	alt = info.RecipientAlt
+	if !info.IsFromMe {
+		return chat, info.SenderAlt
+	}
+	if isOwnJID(chat, own, ownLID) && info.DeviceSentMeta != nil && info.DeviceSentMeta.DestinationJID != "" {
+		if dest, err := types.ParseJID(info.DeviceSentMeta.DestinationJID); err == nil && dest.User != "" &&
+			!isOwnJID(dest, own, ownLID) {
+			// RecipientAlt, if any, named the owner's other address, not the contact's.
+			return dest.ToNonAD(), types.EmptyJID
+		}
+	}
+	return chat, alt
+}
+
+// ownJIDs returns the owner's phone-number and LID addresses, empty before login.
+func ownJIDs(client *whatsmeow.Client) (own, ownLID types.JID) {
+	if client == nil || client.Store == nil {
+		return types.EmptyJID, types.EmptyJID
+	}
+	if client.Store.ID != nil {
+		own = client.Store.ID.ToNonAD()
+	}
+	return own, client.Store.LID.ToNonAD()
 }
