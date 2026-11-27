@@ -9,6 +9,7 @@ import (
 
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -241,5 +242,64 @@ func TestPlumbingIsNotAUserVisibleMessage(t *testing.T) {
 		if hasUserVisiblePayload(m) {
 			t.Errorf("%s should not be stored as unsupported", name)
 		}
+	}
+}
+
+// A message the owner types on the primary phone reaches the bridge as a
+// DeviceSentMessage. When the stanza has no recipient attribute whatsmeow files
+// it under the owner's own address; the phone's own destination names the
+// contact. Built the way whatsmeow delivers it (events.Message.UnwrapRaw).
+func TestFromMePhoneMessageGoesToTheContactsChat(t *testing.T) {
+	own := types.NewJID("31629806991", types.DefaultUserServer)
+	ownLID := types.NewJID("225473703464998", types.HiddenUserServer)
+	bas := types.NewJID("95017611882721", types.HiddenUserServer)
+	r := fakePNtoLID{"31629806991": "225473703464998"}
+
+	raw := &waProto.Message{DeviceSentMessage: &waProto.DeviceSentMessage{
+		DestinationJID: proto.String(bas.String()),
+		Message:        &waProto.Message{Conversation: proto.String("Maandag is goed")},
+	}}
+	evt := (&events.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{
+			Chat: own, Sender: own.ToNonAD(), IsFromMe: true,
+		}},
+		RawMessage: raw,
+	}).UnwrapRaw()
+	if got := extractTextContent(evt.Message); got != "Maandag is goed" {
+		t.Fatalf("text: %q", got)
+	}
+
+	chat, alt := chatForMessage(evt.Info, own, ownLID)
+	got := canonicalChatJID(context.Background(), r, chat, alt)
+	if got != bas {
+		t.Errorf("filed under %v, want the contact's chat %v", got, bas)
+	}
+
+	// The destination may be a phone number; the LID store maps it.
+	pnDest := types.NewJID("31612345678", types.DefaultUserServer)
+	evt.Info.DeviceSentMeta.DestinationJID = pnDest.String()
+	evt.Info.RecipientAlt = ownLID // names the owner, never the contact
+	chat, alt = chatForMessage(evt.Info, own, ownLID)
+	if chat != pnDest || !alt.IsEmpty() {
+		t.Errorf("PN destination: chat %v alt %v", chat, alt)
+	}
+
+	// Chat already right: untouched. Message to oneself: stays the own chat.
+	evt.Info.Chat = bas
+	if chat, _ := chatForMessage(evt.Info, own, ownLID); chat != bas {
+		t.Errorf("explicit chat changed to %v", chat)
+	}
+	self := evt.Info
+	self.Chat = own
+	self.DeviceSentMeta = &types.DeviceSentMeta{DestinationJID: ownLID.String()}
+	if chat, _ := chatForMessage(self, own, ownLID); chat != own {
+		t.Errorf("self chat moved to %v", chat)
+	}
+	// Incoming messages never use it.
+	in := evt.Info
+	in.IsFromMe = false
+	in.Chat = own
+	if chat, _ := chatForMessage(in, own, ownLID); chat != own {
+		t.Errorf("incoming moved to %v", chat)
 	}
 }
